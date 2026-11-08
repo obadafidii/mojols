@@ -69,6 +69,7 @@ type State struct {
 	Docs            map[string]DocState `json:"docs"`
 	ClientResponses []json.RawMessage   `json:"clientResponses"`
 	Cancelled       []string            `json:"cancelled"`
+	Args            []string            `json:"args"`
 }
 
 type fake struct {
@@ -90,7 +91,7 @@ func Run(in io.Reader, out io.Writer, opts Options) int {
 		opts:  opts,
 		w:     jsonrpc.NewWriter(out),
 		docs:  text.NewStore(),
-		state: State{PID: os.Getpid(), Docs: map[string]DocState{}},
+		state: State{PID: os.Getpid(), Docs: map[string]DocState{}, Args: os.Args[1:]},
 		hung:  map[jsonrpc.ID]bool{},
 	}
 	r := jsonrpc.NewReader(in)

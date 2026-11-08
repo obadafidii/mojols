@@ -20,6 +20,7 @@ Design doc: [Mojo LSP: Design Doc](https://claude.ai/artifact/9rWQUQFcebHzUmnJzX
 | Cancellation forwarded; queued requests cancelled locally | `TestCancelReachesBackend` |
 | Editor hangs up: backend never orphaned | `TestEditorHangupKillsBackend` |
 | A file that crashes the backend is found and quarantined: suspects are reopened one at a time, the guilty file gets an in-file warning and fast errors, every other file keeps full features, saving different content retries it | `TestPoisonedFileIsQuarantined`, `TestOnlyTheGuiltySuspectIsQuarantined`, `TestRequestCrashQuarantinesNothing` |
+| Package roots inferred and passed as `-I` (parent of every top-level package and `.mojopkg`), re-scanned before each backend start; stdlib copies and environments are never added | `internal/roots` tests, `mojols doctor` |
 | UTF-16/UTF-8/UTF-32 positions, incremental edits | table tests + `FuzzOffset` against a reference implementation |
 | Strict JSON-RPC framing and decoding | table tests + `FuzzReader` |
 | `mojols doctor`, `mojols/status`, `--trace-file` session recording | manual, `scripts/m0_probe.py` |
@@ -28,7 +29,7 @@ First real-toolchain finding: `mojo-lsp-server` segfaults on `std/io/io.mojo` fr
 
 That crash turned out to be a version mismatch: modular `main` is Mojo 1.3.0.dev, the installed server is 1.1.0. The same file from the `mojo/v1.1.0` tag parses cleanly. M0 is done; results are in [docs/design.md](docs/design.md#m0-findings-mojo-110-macos-arm64-nov-8-2026).
 
-Next (M1): infer package roots for `-I`, cross-file invalidation, memory caps.
+M1 so far: package roots are inferred. Next: cross-file invalidation, memory caps.
 
 ## Quick start
 
@@ -60,7 +61,7 @@ Options go in Zed settings:
     "mojols": {
       "binary": {
         "path": "~/go/bin/mojols",
-        "arguments": ["--log-level", "debug", "--trace-file", "/tmp/mojols-trace.jsonl", "-I", "src"]
+        "arguments": ["--log-level", "debug", "--trace-file", "/tmp/mojols-trace.jsonl"]
       }
     }
   }
@@ -76,11 +77,12 @@ Planned for M4 on JetBrains' LSP API. See [editors/clion](editors/clion/README.m
 ```
 mojols [serve] [flags] [-- extra mojo-lsp-server args]
   --backend PATH      mojo-lsp-server to run (default: discover)
-  -I DIR              include dir passed to mojo-lsp-server (repeatable)
+  -I DIR              include dir passed to mojo-lsp-server (repeatable; wins over inferred ones)
+  --infer-roots=false do not scan the workspace for package roots
   --log-file PATH     logs (default: stderr; stdout carries the protocol)
   --log-level LEVEL   debug | info | warn | error
   --trace-file PATH   record every message as JSON lines
-mojols doctor [dir]   explain backend discovery for a workspace
+mojols doctor [dir]   explain backend discovery and inferred package roots for a workspace
 mojols version
 ```
 

@@ -20,9 +20,11 @@ import (
 	"runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tdadadavid/mojols/server/internal/discover"
 	"github.com/tdadadavid/mojols/server/internal/proxy"
+	pkgroots "github.com/tdadadavid/mojols/server/internal/roots"
 	"github.com/tdadadavid/mojols/server/internal/trace"
 )
 
@@ -61,6 +63,7 @@ func serve(args []string) int {
 	traceFile := fs.String("trace-file", "", "record every LSP message as JSON lines (for bug reports and replay)")
 	var includes multiFlag
 	fs.Var(&includes, "I", "include directory passed to mojo-lsp-server (repeatable)")
+	inferRoots := fs.Bool("infer-roots", true, "find package roots in the workspace and pass them as -I")
 	var extra []string
 	for i, a := range args {
 		if a == "--" {
@@ -97,16 +100,15 @@ func serve(args []string) int {
 		}
 	}
 
-	backendArgs := []string{}
+	// Same reason as --backend: the backend's working directory is the
+	// workspace, not ours.
+	explicit := make([]string, 0, len(includes))
 	for _, dir := range includes {
-		// Same reason as --backend: the backend's working directory is the
-		// workspace, not ours.
 		if abs, err := filepath.Abs(dir); err == nil {
 			dir = abs
 		}
-		backendArgs = append(backendArgs, "-I", dir)
+		explicit = append(explicit, dir)
 	}
-	backendArgs = append(backendArgs, extra...)
 
 	srv := proxy.New(os.Stdin, os.Stdout, proxy.Options{
 		Logger:  logger,
@@ -122,13 +124,40 @@ func serve(args []string) int {
 			if len(roots) > 0 {
 				dir = roots[0]
 			}
-			return proxy.Command{Path: res.Path, Args: backendArgs, Dir: dir}, nil
+			// Inferred again before every start, so a package created while
+			// the editor is open is picked up on the next restart.
+			var inferred []string
+			if *inferRoots {
+				r := pkgroots.Infer(roots, pkgroots.Options{})
+				inferred = r.Roots
+				logger.Info("inferred package roots", "roots", r.Roots, "visited", r.Visited, "elapsed", r.Elapsed.Round(time.Millisecond), "truncated", r.Truncated)
+				for _, sk := range r.Skipped {
+					logger.Warn("package root skipped", "dir", sk.Dir, "reason", sk.Reason)
+				}
+			}
+			return proxy.Command{Path: res.Path, Args: backendArgs(explicit, inferred, extra), Dir: dir}, nil
 		},
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	logger.Info("mojols starting", "version", fullVersion(), "pid", os.Getpid())
 	return srv.Run(ctx)
+}
+
+// backendArgs puts explicit include dirs first (they win), then inferred
+// ones not already given, then raw extra arguments.
+func backendArgs(explicit, inferred, extra []string) []string {
+	args := []string{}
+	seen := map[string]bool{}
+	for _, list := range [][]string{explicit, inferred} {
+		for _, dir := range list {
+			if !seen[dir] {
+				seen[dir] = true
+				args = append(args, "-I", dir)
+			}
+		}
+	}
+	return append(args, extra...)
 }
 
 func newLogger(path, level string) (*slog.Logger, func(), error) {
@@ -170,6 +199,21 @@ func doctor(args []string) int {
 	fmt.Printf("mojols %s\nworkspace %s\n\n", fullVersion(), abs)
 	res, err := discover.Find(*backend, []string{abs}, discover.OSEnv())
 	fmt.Print(discover.Report(res, err))
+
+	r := pkgroots.Infer([]string{abs}, pkgroots.Options{})
+	fmt.Printf("\npackage roots (passed as -I; scanned %d entries in %v):\n", r.Visited, r.Elapsed.Round(time.Millisecond))
+	if len(r.Roots) == 0 {
+		fmt.Println("  none found: imports resolve only against the toolchain and each file's own directory")
+	}
+	for _, root := range r.Roots {
+		fmt.Println("  -I", root)
+	}
+	for _, sk := range r.Skipped {
+		fmt.Printf("  skipped %s: %s\n", sk.Dir, sk.Reason)
+	}
+	if r.Truncated {
+		fmt.Println("  (scan stopped at a limit; some roots may be missing, pass them with -I)")
+	}
 	if err != nil {
 		return 1
 	}

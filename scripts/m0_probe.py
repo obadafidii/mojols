@@ -122,11 +122,13 @@ def main():
     ap.add_argument("--mojols", default=str(Path(__file__).resolve().parent.parent / "bin" / "mojols"))
     ap.add_argument("--backend", help="explicit mojo-lsp-server path")
     ap.add_argument("-I", dest="includes", action="append", default=[])
+    ap.add_argument("--root", help="workspace root, as an editor would open it (default: the files' common directory)")
+    ap.add_argument("--no-infer-roots", action="store_true", help="do not let mojols infer package roots")
     ap.add_argument("files", nargs="+")
     args = ap.parse_args()
 
     files = [Path(f).resolve() for f in args.files]
-    root = Path(os.path.commonpath([str(f.parent) for f in files]))
+    root = Path(args.root).resolve() if args.root else Path(os.path.commonpath([str(f.parent) for f in files]))
     out_dir = Path(__file__).resolve().parent.parent / ".probe"
     out_dir.mkdir(exist_ok=True)
     log_file, trace_file = out_dir / "mojols.log", out_dir / "trace.jsonl"
@@ -135,6 +137,8 @@ def main():
         argv += ["--backend", args.backend]
     for inc in args.includes:
         argv += ["-I", inc]
+    if args.no_infer_roots:
+        argv += ["--infer-roots=false"]
     print(f"logs: {log_file}\ntrace: {trace_file}\nworkspace root: {root}\n", flush=True)
 
     c = Client(argv)
