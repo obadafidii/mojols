@@ -61,3 +61,13 @@ parses a file on first use, and a cold parse must not look like a hang.
 - Projects need their package roots as -I; without them imports fail. mojols should infer them (M1).
 - The corpus must match the toolchain: modular main (1.3.0.dev) segfaults the 1.1.0 server on io.mojo; the mojo/v1.1.0 tag parses cleanly. Use `.corpus/mojo-v<installed>` (git archive of the matching tag).
 - Quarantine handles the real crash: 2 crashes, 7.0 s, one file blocked, everything else works.
+
+## M1 findings: cross-file invalidation (scripts/invalidation_probe.py)
+
+| Importer | Refresh on: break | Refresh on: fix | Refresh off |
+| --- | --- | --- | --- |
+| direct.mojo (`from mathlib.ops import double`) | error in 413 ms | cleared in 153 ms | stale |
+| main.mojo (`from mathlib import double`, via `__init__`) | refreshed, no error shown | refreshed in 175 ms | stale |
+
+- The official server never re-checks importers itself; mojols' refresh meets the 1 s target.
+- The official server does not report a break inside an indirectly imported module (it skips imported bodies and reports only main-file errors). Candidate feature: open the broken module behind the scenes and warn on the importer's import line.
