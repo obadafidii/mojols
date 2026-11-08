@@ -99,6 +99,11 @@ func serve(args []string) int {
 
 	backendArgs := []string{}
 	for _, dir := range includes {
+		// Same reason as --backend: the backend's working directory is the
+		// workspace, not ours.
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
 		backendArgs = append(backendArgs, "-I", dir)
 	}
 	backendArgs = append(backendArgs, extra...)
