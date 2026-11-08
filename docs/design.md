@@ -71,3 +71,15 @@ parses a file on first use, and a cold parse must not look like a hang.
 
 - The official server never re-checks importers itself; mojols' refresh meets the 1 s target.
 - The official server does not report a break inside an indirectly imported module (it skips imported bodies and reports only main-file errors). Candidate feature: open the broken module behind the scenes and warn on the importer's import line.
+
+## M1 findings: memory (scripts/memory_probe.py, 40 stdlib files, 3 close/reopen rounds)
+
+| Setup | 20 open | 40 open | All closed (churn) | All reopened (churn) |
+| --- | --- | --- | --- | --- |
+| Official server alone | 659 MB | 1,252 MB | 579-679 MB | 1,289-1,342 MB |
+| mojols, 20-document cap | 660 MB | 737 MB | 516-545 MB | 740-753 MB |
+| mojols, cap + 700 MB recycle | 654 MB | 749 MB | 245 MB after recycle | 664-710 MB |
+
+- ~31 MB per open document; closing returns about half. The cap cuts 40 open files from 1,252 MB to 737 MB.
+- Recycle: 184 ms from decision to a ready backend with 20 files reopened; no failed request; not counted as a restart. Exceeding the limit again 20 s later was held by the cooldown.
+- With the default 3 GB limit, recycling is a backstop; the cap does the everyday work.
