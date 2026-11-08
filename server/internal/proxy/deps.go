@@ -168,6 +168,11 @@ func (s *Server) refreshDependents() {
 	}
 	var candidates []string
 	for _, d := range s.docs.Snapshot() {
+		// Documents not resident in the backend are reopened fresh when next
+		// touched, so only resident ones can be stale.
+		if _, res := s.resident[d.URI]; !res {
+			continue
+		}
 		if q, p := s.blockedLocked(d.URI); !q && !p {
 			candidates = append(candidates, d.URI)
 		}
@@ -204,7 +209,7 @@ func (s *Server) refreshDependents() {
 		if q, p := s.blockedLocked(uri); q || p {
 			continue
 		}
-		s.sendBackendLocked(&jsonrpc.Message{Method: "textDocument/didClose", Params: mustJSON(map[string]any{"textDocument": map[string]any{"uri": uri}})})
+		s.sendDidCloseLocked(uri)
 		s.sendDidOpenLocked(d)
 		n++
 	}

@@ -54,6 +54,13 @@ type Options struct {
 	ProbeTimeout    time.Duration            // how long a crash suspect may take to parse alone: 30s
 	NoRefresh       bool                     // do not re-open documents whose imports changed on disk
 	RefreshDebounce time.Duration            // wait for saves to settle before refreshing: 150ms
+
+	MaxResidentDocs int                          // documents open in the backend at once: 20 (~31 MB each); <0 = no cap
+	MemoryLimitMB   int                          // recycle the backend above this resident memory: 3072; <0 = never
+	MemoryCheck     time.Duration                // how often to sample backend memory: 2s
+	RecycleDrain    time.Duration                // how long in-flight requests may finish before a recycle: 3s
+	RecycleCooldown time.Duration                // minimum time between recycles: 5m
+	SampleRSS       func(pid int) (int64, error) // defaults to SampleRSS (ps)
 }
 
 // DefaultTimeouts are deliberately generous: the official server parses a
@@ -88,6 +95,18 @@ func (o *Options) setDefaults() {
 	def(&o.ShutdownGrace, 2*time.Second)
 	def(&o.ProbeTimeout, 30*time.Second)
 	def(&o.RefreshDebounce, 150*time.Millisecond)
+	def(&o.MemoryCheck, 2*time.Second)
+	def(&o.RecycleDrain, 3*time.Second)
+	def(&o.RecycleCooldown, 5*time.Minute)
+	if o.MaxResidentDocs == 0 {
+		o.MaxResidentDocs = 20
+	}
+	if o.MemoryLimitMB == 0 {
+		o.MemoryLimitMB = 3072
+	}
+	if o.SampleRSS == nil {
+		o.SampleRSS = SampleRSS
+	}
 	if o.HangThreshold == 0 {
 		o.HangThreshold = 3
 	}
@@ -144,6 +163,10 @@ type Status struct {
 	Probing          string   `json:"probing,omitempty"`
 	Suspects         []string `json:"suspects,omitempty"`
 	Refreshes        int      `json:"dependentRefreshes"`
+	ResidentDocs     int      `json:"residentDocuments"`
+	Evictions        int      `json:"evictions"`
+	Recycles         int      `json:"recycles"`
+	BackendRSSMB     int64    `json:"backendRssMB,omitempty"`
 }
 
 // Server is one editor session.
@@ -198,6 +221,16 @@ type Server struct {
 	refreshTimer *time.Timer
 	refreshes    int
 	watching     bool
+
+	// Memory (memory.go).
+	resident    map[string]time.Time // documents open in the backend -> last use
+	lastUse     map[string]time.Time // every open document -> last use
+	evictions   int
+	recycling   bool
+	plannedGen  int
+	recycles    int
+	lastRecycle time.Time
+	backendRSS  int64
 }
 
 // New returns a server reading the editor's messages from in and writing to out.
@@ -215,6 +248,8 @@ func New(in io.Reader, out io.Writer, opts Options) *Server {
 		health:     map[string]*docHealth{},
 		quarantine: map[string]*quarantined{},
 		changed:    map[string]bool{},
+		resident:   map[string]time.Time{},
+		lastUse:    map[string]time.Time{},
 	}
 	s.deps = newDepGraph(func(path string) (string, bool) {
 		for _, d := range s.docs.Snapshot() {
@@ -234,6 +269,7 @@ func (s *Server) Run(ctx context.Context) int {
 	readErr := make(chan error, 1)
 	stop := make(chan struct{})
 	defer close(stop)
+	go s.watchMemory(stop)
 	go func() {
 		for {
 			m, body, err := s.in.Read()
@@ -401,6 +437,12 @@ func (s *Server) handleRequest(m *jsonrpc.Message) {
 		}
 		return
 	}
+	if uri := docURIOf(m.Params); uri != "" {
+		if _, open := s.docs.Get(uri); open {
+			s.lastUse[uri] = time.Now()
+			s.ensureResidentLocked(uri) // queued behind its parse in the backend
+		}
+	}
 	if old, dup := s.byClient[*m.ID]; dup {
 		s.log.Warn("editor reused an in-flight request id", "id", m.ID.String(), "previous", old)
 	}
@@ -488,6 +530,9 @@ func (s *Server) handleDocSync(m *jsonrpc.Message) {
 	if m.Method == "textDocument/didClose" {
 		// Closed after the quarantine rules ran, so they still see the text.
 		defer s.docs.Close(td.URI)
+		delete(s.lastUse, td.URI)
+	} else if m.Method != "textDocument/didSave" {
+		s.lastUse[td.URI] = time.Now()
 	}
 	if m.Method == "textDocument/didSave" {
 		s.noteChangedLocked(td.URI) // the file on disk changed: its importers are stale
@@ -504,9 +549,31 @@ func (s *Server) handleDocSync(m *jsonrpc.Message) {
 		}
 		return
 	}
-	s.sendBackendLocked(m)
-	if m.Method == "textDocument/didOpen" || m.Method == "textDocument/didChange" {
+	_, isResident := s.resident[td.URI]
+	switch m.Method {
+	case "textDocument/didOpen":
+		s.sendBackendLocked(m)
+		s.resident[td.URI] = time.Now()
 		s.health[td.URI] = &docHealth{gen: s.be.gen}
+		s.evictLocked(td.URI)
+	case "textDocument/didChange":
+		if isResident {
+			s.sendBackendLocked(m)
+			s.resident[td.URI] = time.Now()
+			s.health[td.URI] = &docHealth{gen: s.be.gen}
+		} else {
+			s.ensureResidentLocked(td.URI) // opens it with the text this change produced
+		}
+	case "textDocument/didClose":
+		if isResident {
+			s.sendBackendLocked(m)
+			delete(s.resident, td.URI)
+			delete(s.health, td.URI)
+		}
+	default: // didSave
+		if isResident {
+			s.sendBackendLocked(m)
+		}
 	}
 }
 
@@ -630,15 +697,18 @@ func (s *Server) onBackendInitialized(gen int, result json.RawMessage) {
 		n, _ := jsonrpc.NewNotification("initialized", json.RawMessage(`{}`))
 		s.sendBackendLocked(n)
 	}
+	// Quarantined and suspect documents are skipped (suspects are reopened
+	// alone after the others); beyond the residency cap, only the most
+	// recently used are reopened.
 	replayed := 0
-	for _, d := range s.docs.Snapshot() {
-		if q, probation := s.blockedLocked(d.URI); q || probation {
-			continue // quarantined, or reopened alone after the others
+	for _, uri := range s.replayOrderLocked() {
+		if d, ok := s.docs.Get(uri); ok {
+			s.sendDidOpenLocked(d)
+			replayed++
 		}
-		s.sendDidOpenLocked(d)
-		replayed++
 	}
 	s.ready = true
+	s.recycling = false
 	wasDegraded := s.degraded
 	s.degraded = false
 	s.backoffStep = 0
@@ -675,8 +745,15 @@ func (s *Server) backendFailed(gen int, reason error) {
 	be := s.be
 	s.be = nil
 	s.ready = false
-	s.lastErr = reason.Error()
-	s.restarts++
+	s.resident = map[string]time.Time{}
+	planned := s.plannedGen == gen
+	if planned {
+		s.recycles++
+		s.lastRecycle = time.Now()
+	} else {
+		s.lastErr = reason.Error()
+		s.restarts++
+	}
 
 	var replies []*jsonrpc.Message
 	for id, p := range s.pending {
@@ -699,6 +776,15 @@ func (s *Server) backendFailed(gen int, reason error) {
 	}
 	if s.shutdown {
 		s.mu.Unlock()
+		s.sendAll(replies)
+		return
+	}
+	if planned {
+		// A recycle, not a failure: no crash attribution, no backoff.
+		s.health = map[string]*docHealth{}
+		s.restartTimer = time.AfterFunc(0, s.launch)
+		s.mu.Unlock()
+		s.log.Info("backend recycled; starting a fresh one", "generation", gen)
 		s.sendAll(replies)
 		return
 	}
@@ -847,10 +933,20 @@ func (s *Server) onBackendMessage(b *backend, m *jsonrpc.Message) {
 		current := s.be == b
 		if current && m.Method == "textDocument/publishDiagnostics" {
 			var p struct {
-				URI string `json:"uri"`
+				URI         string            `json:"uri"`
+				Diagnostics []json.RawMessage `json:"diagnostics"`
 			}
 			if json.Unmarshal(m.Params, &p) == nil {
 				s.onDiagnosedLocked(b.gen, p.URI)
+				_, open := s.docs.Get(p.URI)
+				_, isResident := s.resident[p.URI]
+				if open && !isResident && len(p.Diagnostics) == 0 {
+					// The backend clearing a document mojols evicted, while the
+					// editor still has it open: keep what the editor shows.
+					// Non-empty results from a parse that finished after the
+					// eviction still go through.
+					current = false
+				}
 			}
 		}
 		s.mu.Unlock()
@@ -974,6 +1070,10 @@ func (s *Server) Status() Status {
 		PositionEncoding: s.docs.Encoding().String(),
 		LastBackendError: s.lastErr,
 		Refreshes:        s.refreshes,
+		ResidentDocs:     len(s.resident),
+		Evictions:        s.evictions,
+		Recycles:         s.recycles,
+		BackendRSSMB:     s.backendRSS >> 20,
 	}
 	if s.be != nil && s.be.cmd.Process != nil {
 		st.BackendPID = s.be.cmd.Process.Pid

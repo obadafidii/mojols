@@ -22,6 +22,7 @@ Design doc: [Mojo LSP: Design Doc](https://claude.ai/artifact/9rWQUQFcebHzUmnJzX
 | A file that crashes the backend is found and quarantined: suspects are reopened one at a time, the guilty file gets an in-file warning and fast errors, every other file keeps full features, saving different content retries it | `TestPoisonedFileIsQuarantined`, `TestOnlyTheGuiltySuspectIsQuarantined`, `TestRequestCrashQuarantinesNothing` |
 | Package roots inferred and passed as `-I` (parent of every top-level package and `.mojopkg`), re-scanned before each backend start; stdlib copies and environments are never added | `internal/roots` tests, `mojols doctor` |
 | Saving a file, or changing it on disk (watchers registered with the editor), re-checks every open file that imports it, transitively | `TestSaveRefreshesTransitiveDependents`, `TestDiskChangeRefreshesDependents`, `TestNewImportIsFollowed`, `scripts/invalidation_probe.py` |
+| Memory: at most 20 documents open in the backend (measured ~31 MB each), least recently used reopened on touch with their current text and their diagnostics kept; above 3 GB the backend is recycled without failing a request | `TestResidencyCapEvictsLeastRecentlyUsed`, `TestEditsToEvictedDocumentSurvive`, `TestRecycleOverMemoryLimitFailsNothing`, `scripts/memory_probe.py` |
 | UTF-16/UTF-8/UTF-32 positions, incremental edits | table tests + `FuzzOffset` against a reference implementation |
 | Strict JSON-RPC framing and decoding | table tests + `FuzzReader` |
 | `mojols doctor`, `mojols/status`, `--trace-file` session recording | manual, `scripts/m0_probe.py` |
@@ -30,7 +31,7 @@ First real-toolchain finding: `mojo-lsp-server` segfaults on `std/io/io.mojo` fr
 
 That crash turned out to be a version mismatch: modular `main` is Mojo 1.3.0.dev, the installed server is 1.1.0. The same file from the `mojo/v1.1.0` tag parses cleanly. M0 is done; results are in [docs/design.md](docs/design.md#m0-findings-mojo-110-macos-arm64-nov-8-2026).
 
-M1 so far: package roots are inferred; importers are refreshed on save. Next: memory caps.
+M1 so far: package roots are inferred; importers are refreshed on save; memory is capped. Next: the 8-hour soak test.
 
 ## Quick start
 
@@ -81,6 +82,8 @@ mojols [serve] [flags] [-- extra mojo-lsp-server args]
   -I DIR              include dir passed to mojo-lsp-server (repeatable; wins over inferred ones)
   --infer-roots=false do not scan the workspace for package roots
   --refresh-dependents=false  do not re-check importers when a file is saved
+  --max-resident-docs N       documents open in mojo-lsp-server at once (default 20; -1 = no cap)
+  --memory-limit-mb N         recycle mojo-lsp-server above this resident memory (default 3072; -1 = never)
   --log-file PATH     logs (default: stderr; stdout carries the protocol)
   --log-level LEVEL   debug | info | warn | error
   --trace-file PATH   record every message as JSON lines

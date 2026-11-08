@@ -201,6 +201,7 @@ func (f *fake) handle(m *jsonrpc.Message) {
 		f.publishDiagnostics(uri)
 	case "textDocument/didClose":
 		f.docs.Close(uri)
+		f.publishDiagnostics(uri) // the real server clears a closed document's diagnostics
 	case "textDocument/hover":
 		d, ok := f.docs.Get(uri)
 		if !ok {
@@ -257,9 +258,17 @@ func (f *fake) handle(m *jsonrpc.Message) {
 	}
 }
 
-// publishDiagnostics reports no problems, like the real server after a clean parse.
+// publishDiagnostics reports one warning if the document contains WARN,
+// otherwise none; a closed document gets an empty list, like the real server.
 func (f *fake) publishDiagnostics(uri string) {
-	n, _ := jsonrpc.NewNotification("textDocument/publishDiagnostics", map[string]any{"uri": uri, "diagnostics": []any{}})
+	diags := []any{}
+	if d, ok := f.docs.Get(uri); ok && strings.Contains(d.Text, "WARN") {
+		diags = append(diags, map[string]any{
+			"range":    map[string]any{"start": map[string]any{"line": 0, "character": 0}, "end": map[string]any{"line": 0, "character": 4}},
+			"severity": 2, "message": "fake warning",
+		})
+	}
+	n, _ := jsonrpc.NewNotification("textDocument/publishDiagnostics", map[string]any{"uri": uri, "diagnostics": diags})
 	f.w.Write(n)
 }
 

@@ -65,6 +65,8 @@ func serve(args []string) int {
 	fs.Var(&includes, "I", "include directory passed to mojo-lsp-server (repeatable)")
 	inferRoots := fs.Bool("infer-roots", true, "find package roots in the workspace and pass them as -I")
 	refresh := fs.Bool("refresh-dependents", true, "re-check open files when a file they import is saved or changes on disk")
+	maxResident := fs.Int("max-resident-docs", 20, "documents kept open in mojo-lsp-server at once (~31 MB each); others reopen when touched; -1 = no cap")
+	memLimit := fs.Int("memory-limit-mb", 3072, "recycle mojo-lsp-server when its resident memory passes this; -1 = never")
 	var extra []string
 	for i, a := range args {
 		if a == "--" {
@@ -112,10 +114,12 @@ func serve(args []string) int {
 	}
 
 	srv := proxy.New(os.Stdin, os.Stdout, proxy.Options{
-		Logger:    logger,
-		Tracer:    tracer,
-		Version:   fullVersion(),
-		NoRefresh: !*refresh,
+		Logger:          logger,
+		Tracer:          tracer,
+		Version:         fullVersion(),
+		NoRefresh:       !*refresh,
+		MaxResidentDocs: *maxResident,
+		MemoryLimitMB:   *memLimit,
 		Resolve: func(roots []string) (proxy.Command, error) {
 			res, err := discover.Find(*backend, roots, discover.OSEnv())
 			if err != nil {

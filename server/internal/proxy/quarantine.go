@@ -73,6 +73,7 @@ func (s *Server) sendDidOpenLocked(d text.Document) {
 	})
 	s.sendBackendLocked(n)
 	s.health[d.URI] = &docHealth{gen: s.be.gen}
+	s.resident[d.URI] = time.Now()
 }
 
 // onDiagnosedLocked records that the backend finished with uri.
@@ -204,12 +205,10 @@ func (s *Server) handleBlockedSyncLocked(method, uri string) bool {
 			return true
 		}
 		if s.probing == uri {
-			delete(s.health, uri)
-			s.sendBackendLocked(&jsonrpc.Message{Method: method, Params: mustJSON(map[string]any{"textDocument": map[string]any{"uri": uri}})})
+			s.sendDidCloseLocked(uri)
 			s.endProbeLocked()
 			return true
 		}
-		delete(s.health, uri)
 		return false
 	}
 	switch {

@@ -37,7 +37,7 @@ def rss_mb(pid):
 
 
 def peak_rss(pid, seconds=1.5, samples=4):
-    best = None
+    best = 0.0
     for _ in range(samples):
         v = rss_mb(pid)
         if v is not None and (best is None or v > best):
@@ -70,6 +70,8 @@ def main():
     ap.add_argument("--max", type=int, default=40)
     ap.add_argument("--cycles", type=int, default=3)
     ap.add_argument("--backend", help="explicit mojo-lsp-server path")
+    ap.add_argument("--max-resident-docs", type=int, default=20, help="passed to mojols (-1: no cap, the raw backend)")
+    ap.add_argument("--memory-limit-mb", type=int, default=3072, help="passed to mojols (-1: never recycle)")
     args = ap.parse_args()
 
     corpus = Path(args.corpus).resolve()
@@ -84,6 +86,14 @@ def main():
     argv = [args.mojols, "serve", "--log-level", "info", "--log-file", str(REPO / ".probe" / "memory.log")]
     if args.backend:
         argv += ["--backend", args.backend]
+    argv += [f"--max-resident-docs={args.max_resident_docs}", f"--memory-limit-mb={args.memory_limit_mb}"]
+    cap = args.max_resident_docs if args.max_resident_docs > 0 else 10**9
+
+    def resident_tail(uris, opened_so_far):
+        # mojols evicts least recently used first, so the most recently opened
+        # `cap` documents are the ones the backend parses to completion.
+        keep = set(opened_so_far[-cap:])
+        return [u for u in uris if u in keep]
     c = Client(argv)
     c.call("initialize", {"processId": os.getpid(), "rootUri": corpus.as_uri(), "capabilities": {}})
     c.notify("initialized", {})
@@ -93,7 +103,11 @@ def main():
         sys.exit(f"no backend running ({st.get('lastBackendError') or 'degraded'}); see .probe/memory.log")
     print(f"corpus {corpus} ({len(texts)} files picked)\nbackend pid {pid}\n")
 
-    base = peak_rss(pid)
+    def backend_pid():
+        # The backend's pid changes when mojols recycles it.
+        return c.call("mojols/status", None)[0]["result"].get("backendPid") or pid
+
+    base = peak_rss(backend_pid())
     print(f"{'open docs':>9} {'backend RSS':>12} {'per doc':>9} {'batch parse':>12}")
     print(f"{0:>9} {base:>9.0f} MB {'':>9} {'':>12}")
 
@@ -104,10 +118,11 @@ def main():
         t0 = time.monotonic()
         for u in batch:
             c.notify("textDocument/didOpen", {"textDocument": {"uri": u, "languageId": "mojo", "version": 1, "text": texts[u]}})
-        done = wait_parsed(c, batch, t0)
+        waited = resident_tail(batch, opened + batch)
+        done = wait_parsed(c, waited, t0) + (len(batch) - len(waited))
         took = time.monotonic() - t0
         opened += batch
-        mem = peak_rss(pid)
+        mem = peak_rss(backend_pid())
         per = (mem - base) / len(opened) if mem and base else 0
         rows.append((len(opened), mem))
         flag = "" if done == len(batch) else f"  ({len(batch) - done} not parsed in time)"
@@ -118,16 +133,17 @@ def main():
         for u in opened:
             c.notify("textDocument/didClose", {"textDocument": {"uri": u}})
         time.sleep(2)
-        closed = peak_rss(pid)
+        closed = peak_rss(backend_pid())
         t0 = time.monotonic()
         for u in opened:
             c.notify("textDocument/didOpen", {"textDocument": {"uri": u, "languageId": "mojo", "version": 1, "text": texts[u]}})
-        wait_parsed(c, opened, t0)
-        reopened = peak_rss(pid)
+        wait_parsed(c, resident_tail(opened, opened), t0)
+        reopened = peak_rss(backend_pid())
         print(f"  cycle {cycle}: all closed {closed:>6.0f} MB   all reopened {reopened:>6.0f} MB", flush=True)
 
     st = c.call("mojols/status", None)[0]["result"]
     print(f"\nmojols itself: {rss_mb(c.proc.pid):.0f} MB   restarts {st.get('restarts')}   quarantined {st.get('quarantined') or 'none'}")
+    print(f"resident in backend: {st.get('residentDocuments')}   evictions: {st.get('evictions')}   recycles: {st.get('recycles')}")
     c.call("shutdown", None)
     c.notify("exit", None)
     c.proc.wait(timeout=15)
