@@ -8,3 +8,4 @@ editors/zed/grammars/
 .DS_Store
 server/internal/*/testdata/fuzz/
 /.probe/
+/.corpus/
