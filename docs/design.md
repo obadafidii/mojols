@@ -30,6 +30,7 @@ its reach and its resilience.
 | Garbage reply | Dropped and counted; the request times out normally |
 | No toolchain | `initialize` still answered with minimal capabilities; degraded mode |
 | Editor hangs up | Backend gets `exit`, then is killed after 2 s |
+| A file crashes the backend | Docs not yet diagnosed at the crash are suspects; after restart they are reopened one at a time; a crash during a probe quarantines that file (in-file warning, requests fail fast, crash not counted toward degraded mode); saving different content retries it |
 
 Deadlines are looser than the latency targets on purpose: the official server
 parses a file on first use, and a cold parse must not look like a hang.

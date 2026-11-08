@@ -170,13 +170,19 @@ def main():
         for attempt in ("cold", "warm"):
             print(f" {attempt}:", flush=True)
             if attempt == "warm":
+                t_close = time.monotonic()
                 c.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+                # The server clears a closed file's diagnostics; don't mistake
+                # that message for the reopened file's parse.
+                c.wait_diagnostics(uri, t_close, timeout=2)
             t0 = time.monotonic()
             c.notify("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "mojo", "version": 1, "text": text}})
             print("  waiting for diagnostics (up to 60 s)...", flush=True)
             parse, diags = c.wait_diagnostics(uri, t0)
             if parse is None:
                 show("diagnostics", "timeout", "no publishDiagnostics within 60 s")
+            elif any(d.get("source") == "mojols" for d in diags):
+                show("diagnostics", f"{parse*1000:.0f} ms", "QUARANTINED by mojols: the backend crashes on this file")
             else:
                 errs = [d for d in diags if d.get("severity") == 1]
                 show("diagnostics", f"{parse*1000:.0f} ms", f"{len(errs)} error(s), {len(diags)} total")
@@ -196,6 +202,9 @@ def main():
     st = status.get("result", {})
     print(f"\nbackend pid {st.get('backendPid')}, restarts {st.get('restarts')}, timeouts {st.get('timeouts')}, "
           f"last backend error: {st.get('lastBackendError') or 'none'}")
+    for q in st.get("quarantined") or []:
+        print(f"quarantined: {q}")
+    print(f"degraded: {st.get('degraded')}")
     print("Errors on files that compile usually mean missing -I include dirs (open question 3).")
     c.call("shutdown", None)
     c.notify("exit", None)

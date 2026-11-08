@@ -12,6 +12,7 @@
 //	MOJOLS_FAKE_HANG_ON=<method>        never answer <method> (until cancelled)
 //	MOJOLS_FAKE_GARBAGE_ON=<method>     answer <method> with an unparseable body
 //	MOJOLS_FAKE_EXIT_ON_START=1         exit(3) before reading anything
+//	MOJOLS_FAKE_CRASH_ON_TEXT=<marker>  segfault-like exit(139) when an opened or changed document contains <marker>
 //
 // Custom methods for tests: fake/state (request) returns what the fake has
 // seen; fake/ask (request) makes the fake send workspace/configuration to the
@@ -23,6 +24,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
@@ -39,6 +41,7 @@ type Options struct {
 	HangOn        string
 	GarbageOn     string
 	ExitOnStart   bool
+	CrashOnText   string
 }
 
 // OptionsFromEnv reads Options from MOJOLS_FAKE_* variables.
@@ -49,6 +52,7 @@ func OptionsFromEnv() Options {
 		HangOn:        os.Getenv("MOJOLS_FAKE_HANG_ON"),
 		GarbageOn:     os.Getenv("MOJOLS_FAKE_GARBAGE_ON"),
 		ExitOnStart:   os.Getenv("MOJOLS_FAKE_EXIT_ON_START") == "1",
+		CrashOnText:   os.Getenv("MOJOLS_FAKE_CRASH_ON_TEXT"),
 	}
 }
 
@@ -184,9 +188,11 @@ func (f *fake) handle(m *jsonrpc.Message) {
 		f.mu.Unlock()
 	case "textDocument/didOpen":
 		f.docs.Open(text.Document{URI: uri, LanguageID: p.TextDocument.LanguageID, Version: p.TextDocument.Version, Text: p.TextDocument.Text})
+		f.crashOnText(uri)
 		f.publishDiagnostics(uri)
 	case "textDocument/didChange":
 		_ = f.docs.Change(uri, p.TextDocument.Version, p.ContentChanges)
+		f.crashOnText(uri)
 		f.publishDiagnostics(uri)
 	case "textDocument/didClose":
 		f.docs.Close(uri)
@@ -246,4 +252,14 @@ func (f *fake) handle(m *jsonrpc.Message) {
 func (f *fake) publishDiagnostics(uri string) {
 	n, _ := jsonrpc.NewNotification("textDocument/publishDiagnostics", map[string]any{"uri": uri, "diagnostics": []any{}})
 	f.w.Write(n)
+}
+
+// crashOnText dies, like the real server's parser, on a poisoned document.
+func (f *fake) crashOnText(uri string) {
+	if f.opts.CrashOnText == "" {
+		return
+	}
+	if d, ok := f.docs.Get(uri); ok && strings.Contains(d.Text, f.opts.CrashOnText) {
+		os.Exit(139)
+	}
 }

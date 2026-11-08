@@ -19,11 +19,14 @@ Design doc: [Mojo LSP: Design Doc](https://claude.ai/artifact/9rWQUQFcebHzUmnJzX
 | Garbage from the backend is dropped and counted, never forwarded | `TestGarbageReplyIsContained` |
 | Cancellation forwarded; queued requests cancelled locally | `TestCancelReachesBackend` |
 | Editor hangs up: backend never orphaned | `TestEditorHangupKillsBackend` |
+| A file that crashes the backend is found and quarantined: suspects are reopened one at a time, the guilty file gets an in-file warning and fast errors, every other file keeps full features, saving different content retries it | `TestPoisonedFileIsQuarantined`, `TestOnlyTheGuiltySuspectIsQuarantined`, `TestRequestCrashQuarantinesNothing` |
 | UTF-16/UTF-8/UTF-32 positions, incremental edits | table tests + `FuzzOffset` against a reference implementation |
 | Strict JSON-RPC framing and decoding | table tests + `FuzzReader` |
 | `mojols doctor`, `mojols/status`, `--trace-file` session recording | manual, `scripts/m0_probe.py` |
 
-Next: answer the three M0 open questions on a real toolchain (run the probe below), then M1 (memory caps, quarantine, cross-file invalidation).
+First real-toolchain finding: `mojo-lsp-server` segfaults on `std/io/io.mojo` from a modular checkout (crash in `string_literal.mojo:69`, likely a source/toolchain version mismatch). Before quarantine that put every file in degraded mode after 5 crashes; now it costs that one file, after 2.
+
+Next: finish the M0 measurements, then the rest of M1 (memory caps, cross-file invalidation).
 
 ## Quick start
 

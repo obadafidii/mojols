@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -50,6 +51,7 @@ type Options struct {
 	CrashLoopWindow time.Duration            // ... within 2m enters degraded mode
 	DegradedRetry   time.Duration            // 2m
 	ShutdownGrace   time.Duration            // 2s
+	ProbeTimeout    time.Duration            // how long a crash suspect may take to parse alone: 30s
 }
 
 // DefaultTimeouts are deliberately generous: the official server parses a
@@ -82,6 +84,7 @@ func (o *Options) setDefaults() {
 	def(&o.CrashLoopWindow, 2*time.Minute)
 	def(&o.DegradedRetry, 2*time.Minute)
 	def(&o.ShutdownGrace, 2*time.Second)
+	def(&o.ProbeTimeout, 30*time.Second)
 	if o.HangThreshold == 0 {
 		o.HangThreshold = 3
 	}
@@ -120,20 +123,23 @@ type serverReq struct {
 
 // Status is the result of the mojols/status request.
 type Status struct {
-	Version          string `json:"version"`
-	Phase            string `json:"phase"`
-	BackendGen       int    `json:"backendGeneration"`
-	BackendPID       int    `json:"backendPid,omitempty"`
-	BackendReady     bool   `json:"backendReady"`
-	Degraded         bool   `json:"degraded"`
-	OpenDocuments    int    `json:"openDocuments"`
-	Pending          int    `json:"pendingRequests"`
-	Queued           int    `json:"queuedMessages"`
-	Restarts         int    `json:"restarts"`
-	Timeouts         int    `json:"timeouts"`
-	DroppedMalformed int    `json:"droppedMalformed"`
-	PositionEncoding string `json:"positionEncoding"`
-	LastBackendError string `json:"lastBackendError,omitempty"`
+	Version          string   `json:"version"`
+	Phase            string   `json:"phase"`
+	BackendGen       int      `json:"backendGeneration"`
+	BackendPID       int      `json:"backendPid,omitempty"`
+	BackendReady     bool     `json:"backendReady"`
+	Degraded         bool     `json:"degraded"`
+	OpenDocuments    int      `json:"openDocuments"`
+	Pending          int      `json:"pendingRequests"`
+	Queued           int      `json:"queuedMessages"`
+	Restarts         int      `json:"restarts"`
+	Timeouts         int      `json:"timeouts"`
+	DroppedMalformed int      `json:"droppedMalformed"`
+	PositionEncoding string   `json:"positionEncoding"`
+	LastBackendError string   `json:"lastBackendError,omitempty"`
+	Quarantined      []string `json:"quarantined,omitempty"`
+	Probing          string   `json:"probing,omitempty"`
+	Suspects         []string `json:"suspects,omitempty"`
 }
 
 // Server is one editor session.
@@ -174,6 +180,13 @@ type Server struct {
 
 	restarts, timeouts, malformed int
 	lastErr                       string
+
+	// Crash attribution and quarantine (quarantine.go).
+	health     map[string]*docHealth
+	quarantine map[string]*quarantined
+	probeQueue []string
+	probing    string
+	probeTimer *time.Timer
 }
 
 // New returns a server reading the editor's messages from in and writing to out.
@@ -188,6 +201,8 @@ func New(in io.Reader, out io.Writer, opts Options) *Server {
 		pending:    map[int64]*pending{},
 		byClient:   map[jsonrpc.ID]int64{},
 		serverReqs: map[int64]serverReq{},
+		health:     map[string]*docHealth{},
+		quarantine: map[string]*quarantined{},
 	}
 }
 
@@ -290,7 +305,7 @@ func (s *Server) handleClient(m *jsonrpc.Message) {
 	case "$/cancelRequest":
 		s.handleCancel(m)
 		return
-	case "textDocument/didOpen", "textDocument/didChange", "textDocument/didClose":
+	case "textDocument/didOpen", "textDocument/didChange", "textDocument/didClose", "textDocument/didSave":
 		s.handleDocSync(m)
 		return
 	}
@@ -334,6 +349,16 @@ func (s *Server) handleRequest(m *jsonrpc.Message) {
 	if s.degraded {
 		s.mu.Unlock()
 		s.replyError(*m.ID, jsonrpc.CodeRequestFailed, "mojols: mojo-lsp-server is unavailable (degraded mode after repeated crashes); see the mojols log")
+		return
+	}
+	if q, probation := s.blockedLocked(docURIOf(m.Params)); q || probation {
+		s.mu.Unlock()
+		name := fileName(docURIOf(m.Params))
+		if q {
+			s.replyError(*m.ID, jsonrpc.CodeRequestFailed, "mojols: "+name+" is quarantined because it crashes mojo-lsp-server; save a change to it to retry")
+		} else {
+			s.replyError(*m.ID, jsonrpc.CodeContentModified, "mojols: "+name+" is being re-checked after a backend crash; retry shortly")
+		}
 		return
 	}
 	if old, dup := s.byClient[*m.ID]; dup {
@@ -417,16 +442,29 @@ func (s *Server) handleDocSync(m *jsonrpc.Message) {
 			// the change; only a replay after a restart would be wrong.
 			s.log.Error("document store out of sync with editor", "err", err)
 		}
-	case "textDocument/didClose":
-		s.docs.Close(td.URI)
 	}
 	s.mu.Lock()
-	if s.ready {
-		s.sendBackendLocked(m)
+	defer s.mu.Unlock()
+	if m.Method == "textDocument/didClose" {
+		// Closed after the quarantine rules ran, so they still see the text.
+		defer s.docs.Close(td.URI)
 	}
-	// Not ready: dropped on purpose. The replay after (re)start sends every
-	// open document's current text, which already includes this change.
-	s.mu.Unlock()
+	if s.handleBlockedSyncLocked(m.Method, td.URI) {
+		return
+	}
+	if !s.ready {
+		// Dropped on purpose (except didSave, which carries no state): the
+		// replay after (re)start sends every open document's current text,
+		// which already includes this change.
+		if m.Method == "textDocument/didSave" && !s.degraded {
+			s.queuedNote = append(s.queuedNote, m)
+		}
+		return
+	}
+	s.sendBackendLocked(m)
+	if m.Method == "textDocument/didOpen" || m.Method == "textDocument/didChange" {
+		s.health[td.URI] = &docHealth{gen: s.be.gen}
+	}
 }
 
 func (s *Server) handleClientResponse(m *jsonrpc.Message) {
@@ -548,12 +586,13 @@ func (s *Server) onBackendInitialized(gen int, result json.RawMessage) {
 		n, _ := jsonrpc.NewNotification("initialized", json.RawMessage(`{}`))
 		s.sendBackendLocked(n)
 	}
-	docs := s.docs.Snapshot()
-	for _, d := range docs {
-		n, _ := jsonrpc.NewNotification("textDocument/didOpen", map[string]any{
-			"textDocument": map[string]any{"uri": d.URI, "languageId": d.LanguageID, "version": d.Version, "text": d.Text},
-		})
-		s.sendBackendLocked(n)
+	replayed := 0
+	for _, d := range s.docs.Snapshot() {
+		if q, probation := s.blockedLocked(d.URI); q || probation {
+			continue // quarantined, or reopened alone after the others
+		}
+		s.sendDidOpenLocked(d)
+		replayed++
 	}
 	s.ready = true
 	wasDegraded := s.degraded
@@ -568,9 +607,10 @@ func (s *Server) onBackendInitialized(gen int, result json.RawMessage) {
 		s.dispatchLocked(p)
 	}
 	s.queue = nil
+	s.startNextProbeLocked()
 	s.mu.Unlock()
 
-	s.log.Info("backend ready", "generation", gen, "replayedDocuments", len(docs))
+	s.log.Info("backend ready", "generation", gen, "replayedDocuments", replayed)
 	if answerID != nil {
 		s.write(&jsonrpc.Message{ID: answerID, Result: answer})
 	}
@@ -619,6 +659,13 @@ func (s *Server) backendFailed(gen int, reason error) {
 		return
 	}
 
+	convicted := s.attributeCrashLocked(gen)
+	if convicted != "" {
+		// The cause is known and contained: this crash says nothing about
+		// whether the backend is healthy for every other file.
+		s.failures = nil
+		s.backoffStep = 0
+	}
 	now := time.Now()
 	recent := s.failures[:0]
 	for _, t := range s.failures {
@@ -668,6 +715,11 @@ func (s *Server) backendFailed(gen int, reason error) {
 	}
 	s.log.Warn("backend failed", "generation", gen, "reason", reason, "nextAttemptIn", delay, "degraded", s.isDegraded())
 	s.sendAll(replies)
+	if convicted != "" {
+		s.log.Warn("document quarantined", "uri", convicted)
+		s.write(quarantineDiagnostics(convicted, true))
+		s.showMessage(2, fmt.Sprintf("mojols: %s crashes mojo-lsp-server, so it is quarantined. Other files keep full features; save a change to it to retry.", fileName(convicted)))
+	}
 	if enteringDegraded {
 		s.showMessage(1, fmt.Sprintf("mojols: mojo-lsp-server keeps failing (%v). Running in degraded mode; retrying every %v.", reason, s.opts.DegradedRetry))
 	}
@@ -749,6 +801,14 @@ func (s *Server) onBackendMessage(b *backend, m *jsonrpc.Message) {
 	default:
 		s.mu.Lock()
 		current := s.be == b
+		if current && m.Method == "textDocument/publishDiagnostics" {
+			var p struct {
+				URI string `json:"uri"`
+			}
+			if json.Unmarshal(m.Params, &p) == nil {
+				s.onDiagnosedLocked(b.gen, p.URI)
+			}
+		}
 		s.mu.Unlock()
 		if current {
 			s.write(m)
@@ -873,6 +933,12 @@ func (s *Server) Status() Status {
 	if s.be != nil && s.be.cmd.Process != nil {
 		st.BackendPID = s.be.cmd.Process.Pid
 	}
+	for uri := range s.quarantine {
+		st.Quarantined = append(st.Quarantined, uri)
+	}
+	sort.Strings(st.Quarantined)
+	st.Probing = s.probing
+	st.Suspects = append([]string(nil), s.probeQueue...)
 	return st
 }
 
