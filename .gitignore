@@ -7,3 +7,4 @@ editors/zed/grammars/
 *.jsonl
 .DS_Store
 server/internal/*/testdata/fuzz/
+/.probe/

@@ -72,6 +72,14 @@ func serve(args []string) int {
 		return 2
 	}
 
+	// The backend runs with the workspace as its working directory, so a
+	// relative --backend must be made absolute against ours first.
+	if strings.ContainsRune(*backend, filepath.Separator) && !filepath.IsAbs(*backend) {
+		if abs, err := filepath.Abs(*backend); err == nil {
+			*backend = abs
+		}
+	}
+
 	logger, closeLog, err := newLogger(*logFile, *logLevel)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mojols:", err)

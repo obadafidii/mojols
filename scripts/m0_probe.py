@@ -127,11 +127,15 @@ def main():
 
     files = [Path(f).resolve() for f in args.files]
     root = Path(os.path.commonpath([str(f.parent) for f in files]))
-    argv = [args.mojols, "serve", "--log-level", "debug"]
+    out_dir = Path(__file__).resolve().parent.parent / ".probe"
+    out_dir.mkdir(exist_ok=True)
+    log_file, trace_file = out_dir / "mojols.log", out_dir / "trace.jsonl"
+    argv = [args.mojols, "serve", "--log-level", "debug", "--log-file", str(log_file), "--trace-file", str(trace_file)]
     if args.backend:
         argv += ["--backend", args.backend]
     for inc in args.includes:
         argv += ["-I", inc]
+    print(f"logs: {log_file}\ntrace: {trace_file}\nworkspace root: {root}\n", flush=True)
 
     c = Client(argv)
     init, t = c.call("initialize", {"processId": os.getpid(), "rootUri": root.as_uri(), "capabilities": {
@@ -143,42 +147,56 @@ def main():
     info = init["result"].get("serverInfo", {})
     print(f"{info.get('name')} {info.get('version')}  (initialize {t*1000:.0f} ms)")
     caps = sorted(k for k, v in init["result"]["capabilities"].items() if v)
-    print("capabilities:", ", ".join(caps))
+    print("capabilities:", ", ".join(caps), flush=True)
     c.notify("initialized", {})
 
-    rows = []
+    def show(label, ms, detail):
+        print(f"  {label:<12} {ms:>8} {detail}", flush=True)
+
+    def outcome(resp):
+        if "error" in resp:
+            return f"ERROR {resp['error'].get('code')}: {resp['error'].get('message')}"
+        r = resp.get("result")
+        if not r:
+            return "empty"
+        if isinstance(r, list):
+            return f"{len(r)} result(s)"
+        return "ok"
+
     for f in files:
         text = f.read_text()
         uri = f.as_uri()
+        print(f"\n{f.name} ({len(text.splitlines())} lines)", flush=True)
         for attempt in ("cold", "warm"):
+            print(f" {attempt}:", flush=True)
             if attempt == "warm":
                 c.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
             t0 = time.monotonic()
             c.notify("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "mojo", "version": 1, "text": text}})
+            print("  waiting for diagnostics (up to 60 s)...", flush=True)
             parse, diags = c.wait_diagnostics(uri, t0)
+            if parse is None:
+                show("diagnostics", "timeout", "no publishDiagnostics within 60 s")
+            else:
+                errs = [d for d in diags if d.get("severity") == 1]
+                show("diagnostics", f"{parse*1000:.0f} ms", f"{len(errs)} error(s), {len(diags)} total")
+                for d in errs[:3]:
+                    show("", "", f"line {d['range']['start']['line']+1}: {d['message'][:100]}")
             sym, t_sym = c.call("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+            show("symbols", f"{t_sym*1000:.0f} ms", outcome(sym))
             pos = first_symbol_position(text)
             hov, t_hov = c.call("textDocument/hover", {"textDocument": {"uri": uri}, "position": pos})
+            show("hover", f"{t_hov*1000:.0f} ms", f"{outcome(hov)} at {pos['line']+1}:{pos['character']+1}")
             call = first_call_position(text)
-            d_ok, t_def = "-", 0.0
             if call:
                 d, t_def = c.call("textDocument/definition", {"textDocument": {"uri": uri}, "position": call})
-                res = d.get("result")
-                d_ok = "error" if "error" in d else ("yes" if res else "empty")
-            errors = sum(1 for x in (diags or []) if x.get("severity") == 1)
-            rows.append((f.name, attempt, parse, errors, len(sym.get("result") or []), t_sym, t_hov,
-                         "yes" if hov.get("result") else "empty", t_def, d_ok))
-
-    print()
-    print(f"{'file':28} {'run':5} {'parse':>8} {'errs':>5} {'syms':>5} {'symbols':>8} {'hover':>8} {'':6} {'def':>8} {'':6}")
-    for name, run, parse, errs, nsym, t_sym, t_hov, hov_ok, t_def, def_ok in rows:
-        p = f"{parse*1000:.0f}ms" if parse is not None else "timeout"
-        print(f"{name[:28]:28} {run:5} {p:>8} {errs:>5} {nsym:>5} {t_sym*1000:>6.0f}ms {t_hov*1000:>6.0f}ms {hov_ok:6} {t_def*1000:>6.0f}ms {def_ok:6}")
+                show("definition", f"{t_def*1000:.0f} ms", f"{outcome(d)} at {call['line']+1}:{call['character']+1}")
 
     status, _ = c.call("mojols/status", None)
     st = status.get("result", {})
-    print(f"\nbackend pid {st.get('backendPid')}, restarts {st.get('restarts')}, timeouts {st.get('timeouts')}")
-    print("Errors > 0 on files that compile usually means missing -I include dirs (open question 3).")
+    print(f"\nbackend pid {st.get('backendPid')}, restarts {st.get('restarts')}, timeouts {st.get('timeouts')}, "
+          f"last backend error: {st.get('lastBackendError') or 'none'}")
+    print("Errors on files that compile usually mean missing -I include dirs (open question 3).")
     c.call("shutdown", None)
     c.notify("exit", None)
     c.proc.wait(timeout=10)
