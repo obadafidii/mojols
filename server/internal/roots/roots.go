@@ -38,7 +38,9 @@ type Result struct {
 	Roots     []string // include dirs, shallowest first
 	Skipped   []Skip
 	Visited   int
-	Truncated bool // a cap was hit; Roots may be incomplete
+	Truncated bool   // a cap was hit; Roots may be incomplete
+	Limit     string // which cap: "entries", "time" or "roots"
+	Fixtures  int    // test-fixture directories not scanned
 	Elapsed   time.Duration
 }
 
@@ -56,6 +58,31 @@ var ignoredDirs = map[string]bool{
 
 func ignored(name string) bool {
 	return strings.HasPrefix(name, ".") || strings.HasPrefix(name, "bazel-") || ignoredDirs[name]
+}
+
+// fixtureDirs hold test inputs: packages built to exercise the compiler,
+// often with deliberately clashing names. Code never imports them, so
+// they are not scanned. Measured on modular/modular: most candidate roots
+// were fixtures (inputs/, testdata/, Inputs/).
+var fixtureDirs = map[string]bool{"inputs": true, "testdata": true, "test_data": true, "fixtures": true}
+
+var testDirs = map[string]bool{"test": true, "tests": true, "unittests": true}
+
+// fixture reports whether dir (relative to the workspace) holds test inputs.
+func fixture(rel string) bool {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	name := strings.ToLower(parts[len(parts)-1])
+	if fixtureDirs[name] {
+		return true
+	}
+	if name == "data" {
+		for _, p := range parts[:len(parts)-1] {
+			if testDirs[strings.ToLower(p)] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var errStop = errors.New("stop")
@@ -109,8 +136,12 @@ func Infer(workspaces []string, opts Options) Result {
 				return nil // unreadable: skip, keep scanning the rest
 			}
 			res.Visited++
-			if res.Visited > opts.MaxEntries || time.Now().After(deadline) {
-				res.Truncated = true
+			if res.Visited > opts.MaxEntries {
+				res.Truncated, res.Limit = true, "entries"
+				return errStop
+			}
+			if time.Now().After(deadline) {
+				res.Truncated, res.Limit = true, "time"
 				return errStop
 			}
 			if !d.IsDir() {
@@ -126,6 +157,10 @@ func Infer(workspaces []string, opts Options) Result {
 				return filepath.SkipDir
 			}
 			rel, _ := filepath.Rel(ws, path)
+			if fixture(rel) {
+				res.Fixtures++
+				return filepath.SkipDir
+			}
 			if strings.Count(rel, string(filepath.Separator))+1 > opts.MaxDepth {
 				return filepath.SkipDir
 			}
@@ -143,33 +178,46 @@ func Infer(workspaces []string, opts Options) Result {
 		}
 	}
 
-	for dir, pkgs := range found {
-		var shadow []string
-		for _, p := range pkgs {
-			if stdlibPackages[p] {
-				shadow = append(shadow, p)
-			}
-		}
-		if len(shadow) > 0 {
-			sort.Strings(shadow)
-			res.Skipped = append(res.Skipped, Skip{Dir: dir, Reason: "would shadow the installed toolchain's " + strings.Join(shadow, ", ") + " package"})
-			continue
-		}
-		res.Roots = append(res.Roots, dir)
+	// Shallowest first: when two roots provide the same package, the
+	// earlier include dir wins, so prefer the one nearest the top.
+	candidates := make([]string, 0, len(found))
+	for dir := range found {
+		candidates = append(candidates, dir)
 	}
-	sort.Slice(res.Roots, func(i, j int) bool {
-		di, dj := depth(res.Roots[i]), depth(res.Roots[j])
+	sort.Slice(candidates, func(i, j int) bool {
+		di, dj := depth(candidates[i]), depth(candidates[j])
 		if di != dj {
 			return di < dj
 		}
-		return res.Roots[i] < res.Roots[j]
+		return candidates[i] < candidates[j]
 	})
-	if len(res.Roots) > opts.MaxRoots {
-		for _, r := range res.Roots[opts.MaxRoots:] {
-			res.Skipped = append(res.Skipped, Skip{Dir: r, Reason: "too many include dirs"})
+	provider := map[string]string{} // package -> include dir providing it
+	for _, dir := range candidates {
+		pkgs := found[dir]
+		sort.Strings(pkgs)
+		var shadow, fresh []string
+		for _, p := range pkgs {
+			switch {
+			case stdlibPackages[p]:
+				shadow = append(shadow, p)
+			case provider[p] == "":
+				fresh = append(fresh, p)
+			}
 		}
-		res.Roots = res.Roots[:opts.MaxRoots]
-		res.Truncated = true
+		switch {
+		case len(shadow) > 0:
+			res.Skipped = append(res.Skipped, Skip{Dir: dir, Reason: "would shadow the installed toolchain's " + strings.Join(shadow, ", ") + " package"})
+		case len(fresh) == 0:
+			res.Skipped = append(res.Skipped, Skip{Dir: dir, Reason: "its package " + pkgs[0] + " is already provided by " + provider[pkgs[0]]})
+		case len(res.Roots) >= opts.MaxRoots:
+			res.Skipped = append(res.Skipped, Skip{Dir: dir, Reason: "too many include dirs"})
+			res.Truncated, res.Limit = true, "roots"
+		default:
+			res.Roots = append(res.Roots, dir)
+			for _, p := range fresh {
+				provider[p] = dir
+			}
+		}
 	}
 	sort.Slice(res.Skipped, func(i, j int) bool { return res.Skipped[i].Dir < res.Skipped[j].Dir })
 	res.Elapsed = time.Since(start)

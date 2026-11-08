@@ -130,7 +130,7 @@ func serve(args []string) int {
 			if *inferRoots {
 				r := pkgroots.Infer(roots, pkgroots.Options{})
 				inferred = r.Roots
-				logger.Info("inferred package roots", "roots", r.Roots, "visited", r.Visited, "elapsed", r.Elapsed.Round(time.Millisecond), "truncated", r.Truncated)
+				logger.Info("inferred package roots", "roots", r.Roots, "visited", r.Visited, "fixtures", r.Fixtures, "elapsed", r.Elapsed.Round(time.Millisecond), "limit", r.Limit)
 				for _, sk := range r.Skipped {
 					logger.Warn("package root skipped", "dir", sk.Dir, "reason", sk.Reason)
 				}
@@ -201,7 +201,7 @@ func doctor(args []string) int {
 	fmt.Print(discover.Report(res, err))
 
 	r := pkgroots.Infer([]string{abs}, pkgroots.Options{})
-	fmt.Printf("\npackage roots (passed as -I; scanned %d entries in %v):\n", r.Visited, r.Elapsed.Round(time.Millisecond))
+	fmt.Printf("\npackage roots (passed as -I; scanned %d entries in %v, %d test-fixture dirs not scanned):\n", r.Visited, r.Elapsed.Round(time.Millisecond), r.Fixtures)
 	if len(r.Roots) == 0 {
 		fmt.Println("  none found: imports resolve only against the toolchain and each file's own directory")
 	}
@@ -211,8 +211,11 @@ func doctor(args []string) int {
 	for _, sk := range r.Skipped {
 		fmt.Printf("  skipped %s: %s\n", sk.Dir, sk.Reason)
 	}
-	if r.Truncated {
-		fmt.Println("  (scan stopped at a limit; some roots may be missing, pass them with -I)")
+	switch r.Limit {
+	case "roots":
+		fmt.Println("  (kept the first 32 roots, shallowest first; pass any others you need with -I)")
+	case "entries", "time":
+		fmt.Printf("  (scan stopped at its %s limit; some roots may be missing, pass them with -I)\n", r.Limit)
 	}
 	if err != nil {
 		return 1

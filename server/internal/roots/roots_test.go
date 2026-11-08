@@ -1,6 +1,7 @@
 package roots
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -76,14 +77,15 @@ func TestCaps(t *testing.T) {
 		t.Fatalf("package below MaxDepth found: %v", res.Roots)
 	}
 	for i := 0; i < 40; i++ {
-		touch(t, ws, "many/"+string(rune('a'+i%26))+strings.Repeat("x", i/26)+"/p/__init__.mojo")
+		name := fmt.Sprintf("d%02d", i)
+		touch(t, ws, "many/"+name+"/pkg_"+name+"/__init__.mojo")
 	}
 	res := Infer([]string{ws}, Options{MaxRoots: 5})
-	if len(res.Roots) != 5 || !res.Truncated {
-		t.Fatalf("MaxRoots not enforced: %d roots, truncated=%v", len(res.Roots), res.Truncated)
+	if len(res.Roots) != 5 || !res.Truncated || res.Limit != "roots" {
+		t.Fatalf("MaxRoots not enforced: %d roots, truncated=%v, limit=%q", len(res.Roots), res.Truncated, res.Limit)
 	}
-	if res := Infer([]string{ws}, Options{MaxEntries: 10}); !res.Truncated {
-		t.Fatal("MaxEntries not enforced")
+	if res := Infer([]string{ws}, Options{MaxEntries: 10}); !res.Truncated || res.Limit != "entries" {
+		t.Fatalf("MaxEntries not enforced: %+v", res)
 	}
 }
 
@@ -91,5 +93,39 @@ func TestMissingWorkspace(t *testing.T) {
 	res := Infer([]string{filepath.Join(t.TempDir(), "gone")}, Options{})
 	if len(res.Roots) != 0 {
 		t.Fatalf("roots from a missing dir: %v", res.Roots)
+	}
+}
+
+// Shapes seen in modular/modular: fixture trees full of packages with
+// deliberately clashing names must not become include dirs.
+func TestFixturesAndDuplicates(t *testing.T) {
+	ws := t.TempDir()
+	touch(t, ws,
+		"src/mathlib/__init__.mojo",
+		"test/helpers/__init__.mojo",               // a real test helper package: kept
+		"test/import/inputs/mathlib/__init__.mojo", // fixture: never scanned
+		"test/run/Inputs/clash/__init__.mojo",      // case-insensitive
+		"graph/testdata/g/__init__.mojo",           // fixture
+		"tools/node/test/data/pkg/__init__.mojo",   // data under a test dir: fixture
+		"examples/a/mathlib/__init__.mojo",         // only re-provides mathlib: dropped
+		"examples/b/mathlib/__init__.mojo",         // same
+		"examples/c/mathlib/__init__.mojo",         // mathlib again ...
+		"examples/c/extra/__init__.mojo",           // ... plus something new: kept
+	)
+	res := Infer([]string{ws}, Options{})
+	if got, want := rel(t, ws, res.Roots), []string{"src", "test", "examples/c"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("roots %v, want %v (skipped %+v)", got, want, res.Skipped)
+	}
+	if res.Fixtures != 4 {
+		t.Fatalf("fixture dirs skipped: %d, want 4", res.Fixtures)
+	}
+	dropped := 0
+	for _, sk := range res.Skipped {
+		if strings.Contains(sk.Reason, "already provided by") {
+			dropped++
+		}
+	}
+	if dropped != 2 || res.Truncated {
+		t.Fatalf("want examples/a and examples/b dropped as redundant: %+v", res.Skipped)
 	}
 }
