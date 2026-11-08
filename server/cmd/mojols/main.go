@@ -64,6 +64,7 @@ func serve(args []string) int {
 	var includes multiFlag
 	fs.Var(&includes, "I", "include directory passed to mojo-lsp-server (repeatable)")
 	inferRoots := fs.Bool("infer-roots", true, "find package roots in the workspace and pass them as -I")
+	refresh := fs.Bool("refresh-dependents", true, "re-check open files when a file they import is saved or changes on disk")
 	var extra []string
 	for i, a := range args {
 		if a == "--" {
@@ -111,9 +112,10 @@ func serve(args []string) int {
 	}
 
 	srv := proxy.New(os.Stdin, os.Stdout, proxy.Options{
-		Logger:  logger,
-		Tracer:  tracer,
-		Version: fullVersion(),
+		Logger:    logger,
+		Tracer:    tracer,
+		Version:   fullVersion(),
+		NoRefresh: !*refresh,
 		Resolve: func(roots []string) (proxy.Command, error) {
 			res, err := discover.Find(*backend, roots, discover.OSEnv())
 			if err != nil {
@@ -135,7 +137,8 @@ func serve(args []string) int {
 					logger.Warn("package root skipped", "dir", sk.Dir, "reason", sk.Reason)
 				}
 			}
-			return proxy.Command{Path: res.Path, Args: backendArgs(explicit, inferred, extra), Dir: dir}, nil
+			dirs := includeDirs(explicit, inferred)
+			return proxy.Command{Path: res.Path, Args: backendArgs(dirs, extra), IncludeDirs: dirs, Dir: dir}, nil
 		},
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -144,18 +147,27 @@ func serve(args []string) int {
 	return srv.Run(ctx)
 }
 
-// backendArgs puts explicit include dirs first (they win), then inferred
-// ones not already given, then raw extra arguments.
-func backendArgs(explicit, inferred, extra []string) []string {
-	args := []string{}
+// includeDirs puts explicit include dirs first (they win), then inferred
+// ones not already given.
+func includeDirs(explicit, inferred []string) []string {
+	var dirs []string
 	seen := map[string]bool{}
 	for _, list := range [][]string{explicit, inferred} {
 		for _, dir := range list {
 			if !seen[dir] {
 				seen[dir] = true
-				args = append(args, "-I", dir)
+				dirs = append(dirs, dir)
 			}
 		}
+	}
+	return dirs
+}
+
+// backendArgs turns include dirs into -I flags, then adds raw extra arguments.
+func backendArgs(dirs, extra []string) []string {
+	args := []string{}
+	for _, dir := range dirs {
+		args = append(args, "-I", dir)
 	}
 	return append(args, extra...)
 }

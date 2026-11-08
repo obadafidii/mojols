@@ -19,8 +19,11 @@ import (
 type Command struct {
 	Path string
 	Args []string
-	Env  []string // added to the inherited environment
-	Dir  string
+	// IncludeDirs are the -I dirs in Args, for resolving imports when
+	// deciding which documents a changed file affects.
+	IncludeDirs []string
+	Env         []string // added to the inherited environment
+	Dir         string
 }
 
 // backend is one generation of mojo-lsp-server.

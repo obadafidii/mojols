@@ -9,3 +9,4 @@ editors/zed/grammars/
 server/internal/*/testdata/fuzz/
 /.probe/
 /.corpus/
+__pycache__/

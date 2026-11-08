@@ -70,6 +70,7 @@ type State struct {
 	ClientResponses []json.RawMessage   `json:"clientResponses"`
 	Cancelled       []string            `json:"cancelled"`
 	Args            []string            `json:"args"`
+	Opens           map[string]int      `json:"opens"` // didOpen count per URI
 }
 
 type fake struct {
@@ -91,7 +92,7 @@ func Run(in io.Reader, out io.Writer, opts Options) int {
 		opts:  opts,
 		w:     jsonrpc.NewWriter(out),
 		docs:  text.NewStore(),
-		state: State{PID: os.Getpid(), Docs: map[string]DocState{}, Args: os.Args[1:]},
+		state: State{PID: os.Getpid(), Docs: map[string]DocState{}, Args: os.Args[1:], Opens: map[string]int{}},
 		hung:  map[jsonrpc.ID]bool{},
 	}
 	r := jsonrpc.NewReader(in)
@@ -189,6 +190,9 @@ func (f *fake) handle(m *jsonrpc.Message) {
 		f.mu.Unlock()
 	case "textDocument/didOpen":
 		f.docs.Open(text.Document{URI: uri, LanguageID: p.TextDocument.LanguageID, Version: p.TextDocument.Version, Text: p.TextDocument.Text})
+		f.mu.Lock()
+		f.state.Opens[uri]++
+		f.mu.Unlock()
 		f.crashOnText(uri)
 		f.publishDiagnostics(uri)
 	case "textDocument/didChange":
@@ -229,6 +233,10 @@ func (f *fake) handle(m *jsonrpc.Message) {
 		}
 		st.ClientResponses = append([]json.RawMessage(nil), f.state.ClientResponses...)
 		st.Cancelled = append([]string(nil), f.state.Cancelled...)
+		st.Opens = map[string]int{}
+		for k, v := range f.state.Opens {
+			st.Opens[k] = v
+		}
 		f.mu.Unlock()
 		f.reply(m, st)
 	case "fake/ask":

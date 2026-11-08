@@ -52,6 +52,8 @@ type Options struct {
 	DegradedRetry   time.Duration            // 2m
 	ShutdownGrace   time.Duration            // 2s
 	ProbeTimeout    time.Duration            // how long a crash suspect may take to parse alone: 30s
+	NoRefresh       bool                     // do not re-open documents whose imports changed on disk
+	RefreshDebounce time.Duration            // wait for saves to settle before refreshing: 150ms
 }
 
 // DefaultTimeouts are deliberately generous: the official server parses a
@@ -85,6 +87,7 @@ func (o *Options) setDefaults() {
 	def(&o.DegradedRetry, 2*time.Minute)
 	def(&o.ShutdownGrace, 2*time.Second)
 	def(&o.ProbeTimeout, 30*time.Second)
+	def(&o.RefreshDebounce, 150*time.Millisecond)
 	if o.HangThreshold == 0 {
 		o.HangThreshold = 3
 	}
@@ -140,6 +143,7 @@ type Status struct {
 	Quarantined      []string `json:"quarantined,omitempty"`
 	Probing          string   `json:"probing,omitempty"`
 	Suspects         []string `json:"suspects,omitempty"`
+	Refreshes        int      `json:"dependentRefreshes"`
 }
 
 // Server is one editor session.
@@ -187,12 +191,19 @@ type Server struct {
 	probeQueue []string
 	probing    string
 	probeTimer *time.Timer
+
+	// Cross-file invalidation (deps.go).
+	deps         *depGraph
+	changed      map[string]bool
+	refreshTimer *time.Timer
+	refreshes    int
+	watching     bool
 }
 
 // New returns a server reading the editor's messages from in and writing to out.
 func New(in io.Reader, out io.Writer, opts Options) *Server {
 	opts.setDefaults()
-	return &Server{
+	s := &Server{
 		opts:       opts,
 		log:        opts.Logger,
 		in:         jsonrpc.NewReader(in),
@@ -203,7 +214,17 @@ func New(in io.Reader, out io.Writer, opts Options) *Server {
 		serverReqs: map[int64]serverReq{},
 		health:     map[string]*docHealth{},
 		quarantine: map[string]*quarantined{},
+		changed:    map[string]bool{},
 	}
+	s.deps = newDepGraph(func(path string) (string, bool) {
+		for _, d := range s.docs.Snapshot() {
+			if p, ok := uriToPath(d.URI); ok && p == path {
+				return d.Text, true
+			}
+		}
+		return "", false
+	})
+	return s
 }
 
 // Run serves the session until the editor sends exit or closes stdin. It
@@ -291,7 +312,11 @@ func (s *Server) handleClient(m *jsonrpc.Message) {
 		if s.ready {
 			s.sendBackendLocked(m)
 		}
+		reg := s.registerWatchersLocked()
 		s.mu.Unlock()
+		if reg != nil {
+			s.write(reg)
+		}
 		return
 	case "shutdown":
 		s.mu.Lock()
@@ -308,6 +333,21 @@ func (s *Server) handleClient(m *jsonrpc.Message) {
 	case "textDocument/didOpen", "textDocument/didChange", "textDocument/didClose", "textDocument/didSave":
 		s.handleDocSync(m)
 		return
+	}
+	if m.Method == "workspace/didChangeWatchedFiles" {
+		var p struct {
+			Changes []struct {
+				URI string `json:"uri"`
+			} `json:"changes"`
+		}
+		if json.Unmarshal(m.Params, &p) == nil {
+			s.mu.Lock()
+			for _, c := range p.Changes {
+				s.noteChangedLocked(c.URI)
+			}
+			s.mu.Unlock()
+		}
+		// Also forwarded below, in case the backend ever watches files itself.
 	}
 	if m.IsNotification() {
 		s.mu.Lock()
@@ -449,6 +489,9 @@ func (s *Server) handleDocSync(m *jsonrpc.Message) {
 		// Closed after the quarantine rules ran, so they still see the text.
 		defer s.docs.Close(td.URI)
 	}
+	if m.Method == "textDocument/didSave" {
+		s.noteChangedLocked(td.URI) // the file on disk changed: its importers are stale
+	}
 	if s.handleBlockedSyncLocked(m.Method, td.URI) {
 		return
 	}
@@ -527,6 +570,7 @@ func (s *Server) launch() {
 		s.backendFailed(gen, err)
 		return
 	}
+	s.deps.setRoots(cmd.IncludeDirs)
 	be, err := startBackend(cmd, gen, s.log, s.opts.Tracer, s.onBackendMessage, s.countMalformed, func(b *backend, err error) {
 		s.backendFailed(b.gen, err)
 	})
@@ -929,6 +973,7 @@ func (s *Server) Status() Status {
 		DroppedMalformed: s.malformed,
 		PositionEncoding: s.docs.Encoding().String(),
 		LastBackendError: s.lastErr,
+		Refreshes:        s.refreshes,
 	}
 	if s.be != nil && s.be.cmd.Process != nil {
 		st.BackendPID = s.be.cmd.Process.Pid
