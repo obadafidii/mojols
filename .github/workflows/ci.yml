@@ -1,0 +1,35 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  server:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l server)" || (gofmt -l server; exit 1)
+      - name: vet and race tests
+        run: make test
+      - name: fuzz (short)
+        run: |
+          cd server
+          go test -run='^$' -fuzz=FuzzReader -fuzztime=20s ./internal/jsonrpc
+          go test -run='^$' -fuzz=FuzzOffset -fuzztime=20s ./internal/text
+
+  zed-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - run: cd editors/zed && cargo build --release --target wasm32-wasip2

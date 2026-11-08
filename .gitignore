@@ -1,0 +1,9 @@
+/bin/
+/dist/
+editors/zed/target/
+editors/zed/extension.wasm
+editors/zed/grammars/
+*.test
+*.jsonl
+.DS_Store
+server/internal/*/testdata/fuzz/

@@ -1,0 +1,74 @@
+[
+  {
+    "label": "mojo run current file",
+    "command": "mojo",
+    "args": ["run", "$ZED_FILE"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "save": "current",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "hide": "never",
+    "tags": ["mojo-main"]
+  },
+  {
+    "label": "mojo test current file",
+    "command": "mojo",
+    "args": ["run", "$ZED_FILE"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "save": "current",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "hide": "never",
+    "tags": ["mojo-test"]
+  },
+  {
+    "label": "mojo build current file",
+    "command": "mojo",
+    "args": ["build", "$ZED_FILE", "-o", "$ZED_WORKTREE_ROOT/build/$ZED_STEM"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "save": "current",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "hide": "never",
+    "tags": ["mojo-build"]
+  },
+  {
+    "label": "mojo format current file",
+    "command": "mojo",
+    "args": ["format", "$ZED_FILE"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "save": "current",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "hide": "never",
+    "tags": ["mojo-format"]
+  },
+  {
+    "label": "mojo doc current file",
+    "command": "mojo",
+    "args": ["doc", "$ZED_FILE"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "save": "current",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "hide": "never",
+    "tags": ["mojo-doc"]
+  },
+  {
+    "label": "mojo repl",
+    "command": "mojo",
+    "args": ["repl"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "save": "none",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "hide": "never",
+    "tags": ["mojo-repl"]
+  }
+]
