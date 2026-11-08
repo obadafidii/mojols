@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -167,6 +168,8 @@ type Status struct {
 	Evictions        int      `json:"evictions"`
 	Recycles         int      `json:"recycles"`
 	BackendRSSMB     int64    `json:"backendRssMB,omitempty"`
+	Goroutines       int      `json:"goroutines"` // mojols itself
+	HeapMB           float64  `json:"heapMB"`     // mojols itself
 }
 
 // Server is one editor session.
@@ -1078,6 +1081,10 @@ func (s *Server) Status() Status {
 	if s.be != nil && s.be.cmd.Process != nil {
 		st.BackendPID = s.be.cmd.Process.Pid
 	}
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	st.Goroutines = runtime.NumGoroutine()
+	st.HeapMB = float64(ms.HeapAlloc) / (1 << 20)
 	for uri := range s.quarantine {
 		st.Quarantined = append(st.Quarantined, uri)
 	}

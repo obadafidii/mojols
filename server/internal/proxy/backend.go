@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
@@ -43,6 +44,8 @@ type backend struct {
 
 	exited  chan struct{} // closed after the process has been reaped
 	exitErr error
+
+	stopping atomic.Bool // mojols asked it to exit: not a failure
 }
 
 func startBackend(c Command, gen int, log *slog.Logger, tr *trace.Tracer,
@@ -101,7 +104,11 @@ func startBackend(c Command, gen int, log *slog.Logger, tr *trace.Tracer,
 		}
 		b.exitErr = reason
 		close(b.exited)
-		blog.Warn("backend exited", "reason", reason, "uptime", time.Since(b.started).Round(time.Millisecond))
+		if b.stopping.Load() {
+			blog.Info("backend stopped", "uptime", time.Since(b.started).Round(time.Millisecond))
+		} else {
+			blog.Warn("backend exited", "reason", reason, "uptime", time.Since(b.started).Round(time.Millisecond))
+		}
 		onExit(b, reason)
 	}()
 	return b, nil
@@ -172,6 +179,7 @@ func (b *backend) kill() {
 
 // stop asks the backend to exit and kills it after grace.
 func (b *backend) stop(grace time.Duration) {
+	b.stopping.Store(true)
 	if exit, err := (&jsonrpc.Message{Method: "exit"}).MarshalJSON(); err == nil {
 		b.send(exit)
 	}

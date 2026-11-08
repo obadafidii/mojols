@@ -213,7 +213,14 @@ func (r Resolver) Resolve(from string, imp Import) []string {
 			base = filepath.Dir(base)
 		}
 	} else {
-		for _, dir := range append([]string{filepath.Dir(from)}, r.Roots...) {
+		// The file's own directory, then the directory above its outermost
+		// enclosing package (how a package imports itself absolutely, e.g.
+		// the stdlib's `from std.collections import List`), then the roots.
+		search := []string{filepath.Dir(from)}
+		if top := r.outermostPackage(filepath.Dir(from)); top != "" {
+			search = append(search, filepath.Dir(top))
+		}
+		for _, dir := range append(search, r.Roots...) {
 			if r.providesTop(dir, parts[0]) {
 				base = dir
 				break
@@ -260,6 +267,21 @@ func (r Resolver) Resolve(from string, imp Import) []string {
 		}
 	}
 	return deps
+}
+
+// outermostPackage walks up from dir while each directory is a package and
+// returns the outermost one, or "" if dir is not inside a package.
+func (r Resolver) outermostPackage(dir string) string {
+	top := ""
+	for r.exists(filepath.Join(dir, "__init__.mojo")) {
+		top = dir
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return top
 }
 
 func (r Resolver) providesTop(dir, name string) bool {

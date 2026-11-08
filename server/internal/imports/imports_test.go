@@ -91,6 +91,7 @@ func TestResolve(t *testing.T) {
 		"app/helper.mojo",
 	)
 	r := Resolver{Roots: []string{filepath.Join(ws, "src")}}
+	noRoots := Resolver{}
 	main := filepath.Join(ws, "app/main.mojo")
 	initF := filepath.Join(ws, "src/mathlib/__init__.mojo")
 	rel := func(ps []string) []string {
@@ -115,9 +116,16 @@ func TestResolve(t *testing.T) {
 		{initF, Import{Module: ".ops", Names: []string{"double"}}, []string{"src/mathlib/__init__.mojo", "src/mathlib/ops.mojo"}},
 		{filepath.Join(ws, "src/mathlib/geo/shapes.mojo"), Import{Module: "..ops"}, []string{"src/mathlib/__init__.mojo", "src/mathlib/ops.mojo"}},
 		{initF, Import{Module: ".", Names: []string{"geo"}}, []string{"src/mathlib/__init__.mojo", "src/mathlib/geo/__init__.mojo"}},
+		// A package importing itself absolutely, with no include dirs: found
+		// by walking up to the outermost package (the stdlib does this).
+		{filepath.Join(ws, "src/mathlib/geo/shapes.mojo"), Import{Module: "mathlib.ops"}, []string{"src/mathlib/__init__.mojo", "src/mathlib/ops.mojo"}},
 	}
-	for _, c := range cases {
-		if got := rel(r.Resolve(c.from, c.imp)); !reflect.DeepEqual(got, c.want) {
+	for i, c := range cases {
+		res := r
+		if i == len(cases)-1 {
+			res = noRoots
+		}
+		if got := rel(res.Resolve(c.from, c.imp)); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s from %s: got %v, want %v", c.imp.Module, filepath.Base(c.from), got, c.want)
 		}
 	}
