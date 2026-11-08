@@ -26,7 +26,9 @@ Design doc: [Mojo LSP: Design Doc](https://claude.ai/artifact/9rWQUQFcebHzUmnJzX
 
 First real-toolchain finding: `mojo-lsp-server` segfaults on `std/io/io.mojo` from a modular checkout (crash in `string_literal.mojo:69`, likely a source/toolchain version mismatch). Before quarantine that put every file in degraded mode after 5 crashes; now it costs that one file, after 2.
 
-Next: finish the M0 measurements, then the rest of M1 (memory caps, cross-file invalidation).
+That crash turned out to be a version mismatch: modular `main` is Mojo 1.3.0.dev, the installed server is 1.1.0. The same file from the `mojo/v1.1.0` tag parses cleanly. M0 is done; results are in [docs/design.md](docs/design.md#m0-findings-mojo-110-macos-arm64-nov-8-2026).
+
+Next (M1): infer package roots for `-I`, cross-file invalidation, memory caps.
 
 ## Quick start
 

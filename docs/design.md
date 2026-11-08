@@ -45,10 +45,19 @@ parses a file on first use, and a cold parse must not look like a hang.
 | M3 | Cross-file references and rename, hierarchies, organize imports | Zero missing or extra refs on stdlib; p95 refs < 1.5 s |
 | M4 | Zed extension published, CLion plugin released | Merged into zed-industries/extensions; live on Marketplace |
 
-## M0 open questions
+## M0 findings (Mojo 1.1.0, macOS arm64, Nov 8 2026)
 
-Run `make probe FILES=...` on a real toolchain to answer:
+| File | Lines | Cold parse (ms) | Warm parse (ms) |
+| --- | --- | --- | --- |
+| hello.mojo | 7 | 304 | 273 |
+| pkgproj/app/main.mojo | 6 | 262 | 280 |
+| std/io/io.mojo (1.1.0) | 493 | 533 | 482 |
+| std/builtin/string_literal.mojo (1.1.0) | 911 | 405 | 403 |
+| std/collections/list.mojo (1.1.0) | 1,746 | 481 | 476 |
+| std/collections/dict.mojo (1.1.0) | 2,403 | 545 | 548 |
 
-1. Does `definition` work on a file only mojols opened?
-2. How long does the first parse take, cold and warm?
-3. Which `-I` include dirs does a pixi project need?
+- Parse cost is mostly fixed (stdlib re-parsed per document) and reopening is no faster. After the parse, symbols take 1 to 7 ms, and hover and definition under 1 ms.
+- Definition works on files only mojols opened, including across packages.
+- Projects need their package roots as -I; without them imports fail. mojols should infer them (M1).
+- The corpus must match the toolchain: modular main (1.3.0.dev) segfaults the 1.1.0 server on io.mojo; the mojo/v1.1.0 tag parses cleanly. Use `.corpus/mojo-v<installed>` (git archive of the matching tag).
+- Quarantine handles the real crash: 2 crashes, 7.0 s, one file blocked, everything else works.
