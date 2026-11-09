@@ -13,6 +13,7 @@
 //	MOJOLS_FAKE_GARBAGE_ON=<method>     answer <method> with an unparseable body
 //	MOJOLS_FAKE_EXIT_ON_START=1         exit(3) before reading anything
 //	MOJOLS_FAKE_CRASH_ON_TEXT=<marker>  segfault-like exit(139) when an opened or changed document contains <marker>
+//	MOJOLS_FAKE_MODIFIED_ONCE_ON=<method> answer the first <method> request with ContentModified
 //	MOJOLS_FAKE_PARSE_MS=<n>            publish diagnostics n ms after an open or change, like a real parse,
 //	                                    and count requests that arrive for a document still being parsed
 //
@@ -48,6 +49,7 @@ type Options struct {
 	ExitOnStart   bool
 	CrashOnText   string
 	ParseDelay    time.Duration
+	ModifiedOnce  string
 }
 
 // OptionsFromEnv reads Options from MOJOLS_FAKE_* variables.
@@ -60,6 +62,7 @@ func OptionsFromEnv() Options {
 		ExitOnStart:   os.Getenv("MOJOLS_FAKE_EXIT_ON_START") == "1",
 		CrashOnText:   os.Getenv("MOJOLS_FAKE_CRASH_ON_TEXT"),
 		ParseDelay:    envMillis("MOJOLS_FAKE_PARSE_MS"),
+		ModifiedOnce:  os.Getenv("MOJOLS_FAKE_MODIFIED_ONCE_ON"),
 	}
 }
 
@@ -82,14 +85,15 @@ type State struct {
 }
 
 type fake struct {
-	opts    Options
-	w       *jsonrpc.Writer
-	docs    *text.Store
-	mu      sync.Mutex
-	state   State
-	hung    map[jsonrpc.ID]bool
-	asked   int
-	parsing map[string]int32 // uri -> version being parsed (ParseDelay)
+	opts     Options
+	w        *jsonrpc.Writer
+	docs     *text.Store
+	mu       sync.Mutex
+	state    State
+	hung     map[jsonrpc.ID]bool
+	asked    int
+	parsing  map[string]int32 // uri -> version being parsed (ParseDelay)
+	modified bool             // ModifiedOnce already answered
 }
 
 // Run serves LSP on in/out until exit, returning the process exit code.
@@ -176,6 +180,11 @@ func (f *fake) handle(m *jsonrpc.Message) {
 		f.mu.Lock()
 		f.hung[*m.ID] = true
 		f.mu.Unlock()
+		return
+	}
+	if m.IsRequest() && m.Method == f.opts.ModifiedOnce && !f.modified {
+		f.modified = true
+		f.w.Write(jsonrpc.NewErrorResponse(m.ID, jsonrpc.NewError(jsonrpc.CodeContentModified, "content modified")))
 		return
 	}
 	if m.IsRequest() && m.Method == f.opts.GarbageOn {

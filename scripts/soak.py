@@ -261,6 +261,8 @@ class Soak:
             "quarantined": len(st.get("quarantined") or []),
             "completion_crashes": (st.get("completionBackend") or {}).get("crashes", 0),
             "completion_memo_hits": (st.get("completionBackend") or {}).get("memoHits", 0),
+            "completion_retries": (st.get("completionBackend") or {}).get("retries", 0),
+            "completion_mirrored": (st.get("completionBackend") or {}).get("mirroredEdits", 0),
             "timeouts": st.get("timeouts", 0),
             "pending": st.get("pendingRequests", 0),
             "unanswered": self.unanswered,
@@ -353,7 +355,8 @@ class Soak:
         lines.append("")
         lines.append(f"duration {dur/3600:.2f} h, {total} requests, actions {dict(self.actions)}")
         lines.append(f"completion backend crashes {self.samples[-1]['completion_crashes']} (contained), "
-                     f"memo hits {self.samples[-1]['completion_memo_hits']}")
+                     f"memo hits {self.samples[-1]['completion_memo_hits']}, retries {self.samples[-1]['completion_retries']}, "
+                     f"mirrored edits {self.samples[-1]['completion_mirrored']}")
         lines.append(f"main backend restarts {self.samples[-1]['restarts']}, recycles {self.samples[-1]['recycles']}, "
                      f"quarantined {self.samples[-1]['quarantined']}, evictions {self.samples[-1]['evictions']}, "
                      f"dependent refreshes {self.samples[-1]['refreshes']}")

@@ -55,6 +55,9 @@ type sidePending struct {
 	method   string
 	key      string // crash memo key
 	timer    *time.Timer
+	msg      *jsonrpc.Message // the request, for a retry
+	uri      string
+	retried  bool
 }
 
 type sidecar struct {
@@ -73,7 +76,7 @@ type sidecar struct {
 	paused   time.Time // no completion until then
 	memo     map[string]bool
 
-	crashCount, memoHits int
+	crashCount, memoHits, mirrored, retries int
 }
 
 func newSidecar(s *Server) *sidecar {
@@ -149,7 +152,7 @@ func (c *sidecar) handle(m *jsonrpc.Message) {
 	if d, ok := c.s.opts.Timeouts[method]; ok {
 		timeout = d
 	}
-	p := &sidePending{clientID: id, method: method, key: key}
+	p := &sidePending{clientID: id, method: method, key: key, msg: m, uri: uri}
 	p.timer = time.AfterFunc(timeout, func() {
 		c.mu.Lock()
 		_, live := c.pending[pid]
@@ -287,6 +290,24 @@ func (c *sidecar) onMessage(b *backend, m *jsonrpc.Message) {
 			return
 		}
 		delete(c.pending, m.ID.Number())
+		if m.Error != nil && m.Error.Code == jsonrpc.CodeContentModified && !p.retried {
+			// The backend dropped it for an edit that arrived just before:
+			// sync the current text and ask once more, rather than making
+			// the editor retry.
+			p.retried = true
+			c.retries++
+			if p.uri != "" {
+				c.syncLocked(c.s.docs.Get(p.uri))
+			}
+			c.nextID++
+			pid := c.nextID
+			c.pending[pid] = p
+			out := *p.msg
+			nid := jsonrpc.NumberID(pid)
+			out.ID = &nid
+			c.sendLocked(&out)
+			return
+		}
 		p.timer.Stop()
 		out := *m
 		out.ID = &p.clientID
@@ -352,6 +373,31 @@ func (c *sidecar) onExit(b *backend, err error) {
 	}
 }
 
+// mirror keeps a document the sidecar holds in step with the editor, so its
+// re-parse runs while the user types instead of when completion is asked
+// for. It sends the full current text, compared by hash, so mirrors that
+// race each other still converge on the latest text. A document the editor
+// closed is closed in the sidecar too.
+func (c *sidecar) mirror(uri string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.be == nil || c.docs[uri] == nil {
+		return
+	}
+	d, open := c.s.docs.Get(uri)
+	if !open {
+		c.sendLocked(notification("textDocument/didClose", map[string]any{"textDocument": map[string]any{"uri": uri}}))
+		delete(c.docs, uri)
+		return
+	}
+	if c.docs[uri].hash != contentHash(d.Text) {
+		used := c.docs[uri].used // a mirror is not a use: keep LRU order
+		c.syncLocked(d, true)
+		c.docs[uri].used = used
+		c.mirrored++
+	}
+}
+
 func (c *sidecar) stop() {
 	c.mu.Lock()
 	be := c.be
@@ -368,10 +414,13 @@ type SidecarStatus struct {
 	MemoHits int  `json:"memoHits"`
 	Paused   bool `json:"paused"`
 	Docs     int  `json:"documents"`
+	Mirrored int  `json:"mirroredEdits"`
+	Retries  int  `json:"retries"`
 }
 
 func (c *sidecar) status() SidecarStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return SidecarStatus{Running: c.be != nil, Crashes: c.crashCount, MemoHits: c.memoHits, Paused: time.Now().Before(c.paused), Docs: len(c.docs)}
+	return SidecarStatus{Running: c.be != nil, Crashes: c.crashCount, MemoHits: c.memoHits, Paused: time.Now().Before(c.paused),
+		Docs: len(c.docs), Mirrored: c.mirrored, Retries: c.retries}
 }

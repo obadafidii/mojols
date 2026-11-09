@@ -121,3 +121,36 @@ func TestSidecarHoldsFewDocuments(t *testing.T) {
 		t.Fatalf("sidecar holds %d documents, want %d", c.Docs, sidecarResident)
 	}
 }
+
+func TestEditsAreMirroredToTheSidecar(t *testing.T) {
+	h := newHarness(t, nil, isolated)
+	h.initialize()
+	h.openURI(aURI, "x")
+	h.openURI(bURI, "never completed in")
+	completionLabels(t, h.complete(aURI, 0, 0)) // the sidecar now holds a.mojo
+	for i := 2; i < 7; i++ {
+		h.replaceText(aURI, i, strings.Repeat("y", i))
+		h.replaceText(bURI, i, strings.Repeat("z", i))
+	}
+	c := h.waitStatus("mirrored edits", func(st Status) bool { return st.Completion.Mirrored >= 1 }).Completion
+	if c.Docs != 1 {
+		t.Fatalf("mirroring must not pull in documents the sidecar does not hold: %+v", c)
+	}
+	if l, _ := completionLabels(t, h.complete(aURI, 0, 0)); len(l) != 1 || l[0] != "fake:"+strings.Repeat("y", 6) {
+		t.Fatalf("completion after mirrored edits: %v", l)
+	}
+	h.notify("textDocument/didClose", map[string]any{"textDocument": map[string]any{"uri": aURI}})
+	h.waitStatus("closed in the sidecar too", func(st Status) bool { return st.Completion.Docs == 0 })
+}
+
+func TestContentModifiedIsRetriedOnce(t *testing.T) {
+	h := newHarness(t, []string{"MOJOLS_FAKE_MODIFIED_ONCE_ON=textDocument/completion"}, isolated)
+	h.initialize()
+	h.openURI(aURI, "x")
+	if l, _ := completionLabels(t, h.complete(aURI, 0, 0)); len(l) != 1 {
+		t.Fatalf("the retry should have produced results: %v", l)
+	}
+	if c := h.status().Completion; c.Retries != 1 {
+		t.Fatalf("retries: %+v", c)
+	}
+}
