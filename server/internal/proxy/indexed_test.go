@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -288,5 +289,78 @@ func TestIndexRenameRefusesUncheckedUses(t *testing.T) {
 	m := h.call("textDocument/rename", map[string]any{"textDocument": map[string]any{"uri": pathToURI(shapes)}, "position": pos(1, 8), "newName": "radius"})
 	if m.Error == nil || !strings.Contains(m.Error.Message, "could not be checked") {
 		t.Errorf("rename with unchecked uses: %v %s", m.Error, m.Result)
+	}
+}
+
+func TestIndexTypeHierarchy(t *testing.T) {
+	dir := indexedWorkspace(t)
+	os.WriteFile(filepath.Join(dir, "pkg/geo/shapes.mojo"), []byte("trait Shape:\n    def area(self) -> Float64: ...\n\nstruct Circle(Shape):\n    var r: Float64\n\ndef area(c: Circle) -> Float64:\n    return c.r * c.r\n"), 0o644)
+	h := newIndexedHarness(t, dir, nil, false)
+	var items []map[string]any
+	h.callOK("textDocument/prepareTypeHierarchy", map[string]any{"textDocument": map[string]any{"uri": pathToURI(filepath.Join(dir, "pkg/geo/shapes.mojo"))}, "position": pos(0, 7)}, &items)
+	if len(items) != 1 || items[0]["name"] != "Shape" || items[0]["kind"].(float64) != symInterface {
+		t.Fatalf("prepare: %+v", items)
+	}
+	var subs []map[string]any
+	h.callOK("typeHierarchy/subtypes", map[string]any{"item": items[0]}, &subs)
+	if len(subs) != 1 || subs[0]["name"] != "Circle" || subs[0]["detail"] != "struct Circle(Shape)" {
+		t.Errorf("subtypes: %+v", subs)
+	}
+	var sups []map[string]any
+	h.callOK("typeHierarchy/supertypes", map[string]any{"item": subs[0]}, &sups)
+	if len(sups) != 1 || sups[0]["name"] != "Shape" {
+		t.Errorf("supertypes: %+v", sups)
+	}
+}
+
+func TestStdlibSources(t *testing.T) {
+	dir := indexedWorkspace(t)
+	lib := t.TempDir()
+	os.MkdirAll(filepath.Join(lib, "std", "collections"), 0o755)
+	os.WriteFile(filepath.Join(lib, "std", "__init__.mojo"), nil, 0o644)
+	os.WriteFile(filepath.Join(lib, "std", "collections", "__init__.mojo"), []byte("from .list import List\n"), 0o644)
+	os.WriteFile(filepath.Join(lib, "std", "collections", "list.mojo"), []byte("trait Sized:\n    def __len__(self) -> Int: ...\n\nstruct List[T: AnyType](Sized):\n    def append(mut self, value: T):\n        pass\n"), 0o644)
+	user := "from std.collections import List\nfrom std.collections.list import Sized\n\nstruct Bag(Sized):\n    var items: List[Int]\n\ndef main():\n    var b = List[Int]()\n    b.append(1)\n"
+	os.WriteFile(filepath.Join(dir, "app/bag.mojo"), []byte(user), 0o644)
+
+	h := newHarness(t, nil, func(o *Options) {
+		o.StdlibSources = "auto"
+		o.StdlibFetch = func(context.Context, string) (string, error) { return lib, nil }
+	})
+	h.call("initialize", map[string]any{"processId": nil, "rootUri": pathToURI(dir), "capabilities": map[string]any{}})
+	h.notify("initialized", map[string]any{})
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.HasPrefix(h.status().StdlibSources, "ready") && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if st := h.status().StdlibSources; !strings.HasPrefix(st, "ready") {
+		t.Fatalf("stdlib sources: %q", st)
+	}
+	bag := pathToURI(filepath.Join(dir, "app/bag.mojo"))
+	var locs []lspLoc
+	h.callOK("textDocument/definition", map[string]any{"textDocument": map[string]any{"uri": bag}, "position": pos(8, 6)}, &locs) // b.append
+	if len(locs) != 1 || !strings.HasSuffix(locs[0].URI, "std/collections/list.mojo") || locs[0].Range.Start.Line != 4 {
+		t.Errorf("definition of append into the stdlib: %+v", locs)
+	}
+	var items []map[string]any
+	h.callOK("textDocument/prepareTypeHierarchy", map[string]any{"textDocument": map[string]any{"uri": bag}, "position": pos(3, 8)}, &items)
+	var sups []map[string]any
+	h.callOK("typeHierarchy/supertypes", map[string]any{"item": items[0]}, &sups)
+	if len(sups) != 1 || sups[0]["name"] != "Sized" {
+		t.Errorf("supertypes of Bag: %+v", sups)
+	}
+	var subs []map[string]any
+	h.callOK("typeHierarchy/subtypes", map[string]any{"item": sups[0]}, &subs)
+	names := []string{}
+	for _, x := range subs {
+		names = append(names, x["name"].(string))
+	}
+	if strings.Join(names, ",") != "Bag,List" {
+		t.Errorf("subtypes of Sized (workspace and library): %v", names)
+	}
+	// Library code is never renamed.
+	m := h.call("textDocument/prepareRename", map[string]any{"textDocument": map[string]any{"uri": bag}, "position": pos(8, 6)})
+	if m.Error == nil || !strings.Contains(m.Error.Message, "outside the workspace") {
+		t.Errorf("rename of a stdlib method: %v %s", m.Error, m.Result)
 	}
 }

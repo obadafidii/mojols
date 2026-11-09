@@ -260,3 +260,44 @@ func TestCyclesTerminate(t *testing.T) {
 	}
 	_ = resolveAt(t, ix, dir, "pkg/a/b.mojo", "W", 0)
 }
+
+func TestTypeHierarchy(t *testing.T) {
+	ix, dir := workspace(t, map[string]string{
+		"pkg/shapes/__init__.mojo": "from .base import Shape, Named\n",
+		"pkg/shapes/base.mojo":     "trait Named:\n    def name(self) -> String: ...\n\ntrait Shape(Named):\n    def area(self) -> Float64: ...\n",
+		"app/circle.mojo":          "from shapes import Shape\n\nstruct Circle(Shape, Copyable):\n    var r: Float64\n",
+		"app/square.mojo":          "from shapes import Shape as S\n\nstruct Square(S):\n    var side: Float64\n\ndef main():\n    var sq = Square(1.0)\n",
+	})
+	base := filepath.Join(dir, "pkg/shapes/base.mojo")
+	shape, ok := ix.DeclAt(base, "Shape", 0)
+	if !ok {
+		t.Fatal("no Shape")
+	}
+	names := func(ts []Target) string {
+		var out []string
+		for _, x := range ts {
+			out = append(out, x.Decl.Name)
+		}
+		return strings.Join(out, ",")
+	}
+	if got := names(ix.Subtypes(shape)); got != "Circle,Square" {
+		t.Errorf("subtypes of Shape: %s (the alias S must count)", got)
+	}
+	if got := names(ix.Supertypes(shape)); got != "Named" {
+		t.Errorf("supertypes of Shape: %s", got)
+	}
+	circle, _ := ix.DeclAt(filepath.Join(dir, "app/circle.mojo"), "Circle", 0)
+	// Copyable is not in the workspace (a binary std): left out.
+	if got := names(ix.Supertypes(circle)); got != "Shape" {
+		t.Errorf("supertypes of Circle: %s", got)
+	}
+	named, _ := ix.DeclAt(base, "Named", 0)
+	if got := names(ix.Subtypes(named)); got != "Shape" {
+		t.Errorf("subtypes of Named: %s", got)
+	}
+	// From a variable, its type.
+	sq := ix.File(filepath.Join(dir, "app/square.mojo"))
+	if tt, ok := ix.TypeAt(sq, at(string(sq.Syn.Src), "sq", 0)); !ok || tt.Decl.Name != "Square" {
+		t.Errorf("TypeAt(sq): %v %v", tt.Decl, ok)
+	}
+}

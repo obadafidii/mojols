@@ -59,6 +59,7 @@ func newHarness(t *testing.T, fakeEnv []string, tweak func(*Options)) *harness {
 		InitTimeout:     10 * time.Second,
 		ShutdownGrace:   time.Second,
 		CrashLoopWindow: time.Minute,
+		StdlibSources:   "off", // never download in tests
 	}
 	if tweak != nil {
 		tweak(&opts)

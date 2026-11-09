@@ -31,6 +31,9 @@ type Index struct {
 
 	budget int // steps left for the current resolution (see stepBudget)
 
+	libs     []string // library source roots (see SetLibraries)
+	libPaths []string // .mojo files under them, listed on first use
+
 	workspace []string // directories a references search covers
 	paths     []string // .mojo files found under them
 	scanned   bool     // paths is current
@@ -235,7 +238,8 @@ func (ix *Index) resolveModule(from, module string) *File {
 		if top := ix.outermostPackage(filepath.Dir(from)); top != "" {
 			search = append(search, filepath.Dir(top))
 		}
-		for _, dir := range append(search, ix.roots...) {
+		search = append(search, ix.roots...)
+		for _, dir := range append(search, ix.libs...) {
 			if ix.exists(filepath.Join(dir, parts[0], "__init__.mojo")) || ix.exists(filepath.Join(dir, parts[0]+".mojo")) {
 				base = dir
 				break

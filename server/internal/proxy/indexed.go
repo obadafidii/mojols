@@ -23,11 +23,14 @@ import (
 // across files and keep working while mojo-lsp-server is down. Definition
 // falls back to the backend when the index cannot resolve a name.
 var indexMethods = map[string]bool{
-	"textDocument/definition":    true,
-	"textDocument/references":    true,
-	"textDocument/prepareRename": true,
-	"textDocument/rename":        true,
-	"workspace/symbol":           true,
+	"textDocument/definition":           true,
+	"textDocument/references":           true,
+	"textDocument/prepareRename":        true,
+	"textDocument/rename":               true,
+	"workspace/symbol":                  true,
+	"textDocument/prepareTypeHierarchy": true,
+	"typeHierarchy/supertypes":          true,
+	"typeHierarchy/subtypes":            true,
 }
 
 // indexDocLocked mirrors a document change into the index. It only records
@@ -62,6 +65,13 @@ type indexParams struct {
 	} `json:"context"`
 	NewName string `json:"newName"`
 	Query   string `json:"query"`
+	Item    struct {
+		Name string `json:"name"`
+		Data struct {
+			Path   string `json:"path"`
+			Offset int    `json:"offset"`
+		} `json:"data"`
+	} `json:"item"`
 }
 
 type location struct {
@@ -99,8 +109,27 @@ func (s *Server) handleIndexed(m *jsonrpc.Message) bool {
 	defer func() {
 		s.log.Debug("answered from the index", "method", m.Method, "elapsed", time.Since(start))
 	}()
-	if m.Method == "workspace/symbol" {
+	switch m.Method {
+	case "workspace/symbol":
 		s.reply(*m.ID, s.workspaceSymbols(p.Query))
+		return true
+	case "typeHierarchy/supertypes", "typeHierarchy/subtypes":
+		t, ok := s.ix.DeclAt(p.Item.Data.Path, p.Item.Name, p.Item.Data.Offset)
+		if !ok {
+			s.reply(*m.ID, nil) // the type is gone (edited away)
+			return true
+		}
+		var related []index.Target
+		if m.Method == "typeHierarchy/supertypes" {
+			related = s.ix.Supertypes(t)
+		} else {
+			related = s.ix.Subtypes(t)
+		}
+		items := []map[string]any{}
+		for _, r := range related {
+			items = append(items, s.typeItem(r))
+		}
+		s.reply(*m.ID, items)
 		return true
 	}
 	path, ok := uriToPath(p.TextDocument.URI)
@@ -139,6 +168,15 @@ func (s *Server) handleIndexed(m *jsonrpc.Message) bool {
 			out = append(out, s.loc(o.File, o.Span))
 		}
 		s.reply(*m.ID, out)
+		return true
+
+	case "textDocument/prepareTypeHierarchy":
+		t, ok := s.ix.TypeAt(f, offset)
+		if !ok {
+			s.reply(*m.ID, nil)
+			return true
+		}
+		s.reply(*m.ID, []map[string]any{s.typeItem(t)})
 		return true
 
 	case "textDocument/prepareRename":
@@ -478,10 +516,32 @@ func (s *Server) workspaceSymbols(query string) []map[string]any {
 	return out
 }
 
+// typeItem is a TypeHierarchyItem for a struct or trait.
+func (s *Server) typeItem(t index.Target) map[string]any {
+	kind := symStruct
+	if t.Decl.Kind == syntax.KTrait {
+		kind = symInterface
+	}
+	enc := s.docs.Encoding()
+	item := map[string]any{
+		"name":           t.Decl.Name,
+		"kind":           kind,
+		"uri":            s.uriFor(t.File.Path),
+		"range":          t.File.Lines.Range(t.Decl.Header.Start, max(t.Decl.Header.End, t.Decl.NameSpan.End), enc),
+		"selectionRange": t.File.Lines.Range(t.Decl.NameSpan.Start, t.Decl.NameSpan.End, enc),
+		"data":           map[string]any{"path": t.File.Path, "offset": t.Decl.NameSpan.Start},
+	}
+	if h := t.File.Syn.Text(t.Decl.Header); h != "" {
+		item["detail"] = strings.Join(strings.Fields(h), " ")
+	}
+	return item
+}
+
 // indexCapabilities are what the index adds to the backend's capabilities.
 func indexCapabilities(caps map[string]any) {
 	caps["definitionProvider"] = true
 	caps["referencesProvider"] = true
 	caps["renameProvider"] = map[string]any{"prepareProvider": true}
 	caps["workspaceSymbolProvider"] = true
+	caps["typeHierarchyProvider"] = true
 }

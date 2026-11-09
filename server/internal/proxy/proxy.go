@@ -73,6 +73,12 @@ type Options struct {
 	// NoIndex turns off mojols' own index: definition, references, rename
 	// and workspace symbols then come from mojo-lsp-server alone.
 	NoIndex bool
+	// StdlibSources says where the index gets the stdlib's sources: "auto"
+	// (the default: matching the installed Mojo, downloaded once into a
+	// cache), "off", or a directory containing std/.
+	StdlibSources string
+	// StdlibFetch overrides how sources are fetched (tests).
+	StdlibFetch func(ctx context.Context, serverPath string) (string, error)
 	// NoVerify turns off confirming, with a separate mojo-lsp-server,
 	// references the index cannot resolve statically.
 	NoVerify bool
@@ -199,6 +205,7 @@ type Status struct {
 	HeldRequests     int            `json:"heldRequests"` // requests held until their document settled
 	Completion       *SidecarStatus `json:"completionBackend,omitempty"`
 	Verifier         *verify.Stats  `json:"verifier,omitempty"`
+	StdlibSources    string         `json:"stdlibSources,omitempty"`
 	Goroutines       int            `json:"goroutines"` // mojols itself
 	HeapMB           float64        `json:"heapMB"`     // mojols itself
 }
@@ -278,6 +285,9 @@ type Server struct {
 	// verifier confirms references mojols cannot resolve statically
 	// (nil with Options.NoVerify or NoIndex).
 	verifier *verify.Verifier
+	// stdlib reports where library sources stand, for mojols/status.
+	stdlibOnce  sync.Once
+	stdlibState string
 }
 
 // New returns a server reading the editor's messages from in and writing to out.
@@ -731,6 +741,9 @@ func (s *Server) launch() {
 	s.mu.Lock()
 	s.lastCmd = cmd
 	s.mu.Unlock()
+	if cmd.Path != "" {
+		s.stdlibOnce.Do(func() { go s.setupStdlib(cmd.Path) })
+	}
 	be, err := startBackend(cmd, gen, s.log, s.opts.Tracer, s.onBackendMessage, s.countMalformed, func(b *backend, err error) {
 		s.backendFailed(b.gen, err)
 	})
@@ -1204,6 +1217,7 @@ func (s *Server) Status() Status {
 		cs := s.side.status()
 		st.Completion = &cs
 	}
+	st.StdlibSources = s.stdlibState
 	if s.verifier != nil {
 		vs := s.verifier.Stats()
 		st.Verifier = &vs

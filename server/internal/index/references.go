@@ -32,35 +32,69 @@ func (ix *Index) SetWorkspace(dirs []string) {
 	ix.scanned = false
 }
 
+// SetLibraries sets directories of library sources (such as the stdlib
+// matching the installed Mojo): imports resolve against them after the
+// package roots, and type hierarchies search them, but they are never
+// edited and references search only the workspace.
+func (ix *Index) SetLibraries(dirs []string) {
+	ix.lock()
+	defer ix.mu.Unlock()
+	ix.libs = append([]string(nil), dirs...)
+	ix.libPaths = nil
+	ix.stat = map[string]bool{}
+	ix.gen++
+}
+
+// listSources lists the .mojo files under dirs, within the workspace
+// limits.
+func listSources(dirs []string) []string {
+	var paths []string
+	seen := map[string]bool{}
+	for _, root := range dirs {
+		filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if path != root && (skipDirs[d.Name()] || strings.HasPrefix(d.Name(), ".")) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if len(paths) >= MaxWorkspaceFiles {
+				return filepath.SkipAll
+			}
+			if strings.HasSuffix(path, ".mojo") || strings.HasSuffix(path, ".🔥") {
+				if info, err := d.Info(); err == nil && info.Size() <= MaxFileBytes && !seen[path] {
+					seen[path] = true
+					paths = append(paths, path)
+				}
+			}
+			return nil
+		})
+	}
+	return paths
+}
+
+// searchFiles is workspaceFiles plus the library sources.
+func (ix *Index) searchFiles() []*File {
+	files := ix.workspaceFiles()
+	if ix.libPaths == nil && len(ix.libs) > 0 {
+		ix.libPaths = listSources(ix.libs)
+	}
+	for _, p := range ix.libPaths {
+		if f := ix.file(p); f != nil {
+			files = append(files, f)
+		}
+	}
+	return files
+}
+
 // workspaceFiles lists (once per change of workspace) and parses every
 // .mojo file under the workspace directories.
 func (ix *Index) workspaceFiles() []*File {
 	if !ix.scanned {
-		ix.paths = ix.paths[:0]
-		seen := map[string]bool{}
-		for _, root := range ix.workspace {
-			filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-				if err != nil {
-					return nil
-				}
-				if d.IsDir() {
-					if path != root && (skipDirs[d.Name()] || strings.HasPrefix(d.Name(), ".")) {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-				if len(ix.paths) >= MaxWorkspaceFiles {
-					return filepath.SkipAll
-				}
-				if strings.HasSuffix(path, ".mojo") || strings.HasSuffix(path, ".🔥") {
-					if info, err := d.Info(); err == nil && info.Size() <= MaxFileBytes && !seen[path] {
-						seen[path] = true
-						ix.paths = append(ix.paths, path)
-					}
-				}
-				return nil
-			})
-		}
+		ix.paths = listSources(ix.workspace)
 		ix.scanned = true
 	}
 	files := make([]*File, 0, len(ix.paths)+len(ix.overlay))

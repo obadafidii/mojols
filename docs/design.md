@@ -168,3 +168,18 @@ Validation against the official server (Mojo 1.1.0, all 579 files of the
 - Left: `__next__` through a generic iterator resolves to the trait's
   method (the server picks the concrete one); a few implicit-conversion
   artifacts.
+
+### Type hierarchy and stdlib sources
+
+- Type hierarchy: `prepareTypeHierarchy` on a struct, trait or variable;
+  supertypes are the traits a type lists, subtypes every struct or trait in
+  the workspace, open documents and library sources that lists it (through
+  imports and aliases). Subtypes of `Writable` on the stdlib: 92, in 369 ms
+  cold and ~5 ms after.
+- Stdlib sources: the installed Mojo ships only compiled `std.mojoc`, so
+  mojols fetches the matching sources (`mojo --version`, the release tag
+  on GitHub: 5 API calls and ~250 raw files, size-capped, path-checked,
+  atomic) into the user cache, or uses `--stdlib-sources=<dir>`. In
+  user-style code (the 1.1 stdlib tests), resolved names rise from 43.2%
+  to 98.1% and members from 4.4% to 86.2%, all into std. `mojols stdlib`
+  fetches them ahead of time; library files are never renamed.

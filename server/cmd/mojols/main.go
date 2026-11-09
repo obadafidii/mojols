@@ -5,6 +5,7 @@
 //
 //	mojols [serve] [flags] [-- extra mojo-lsp-server args]   speak LSP on stdio (default)
 //	mojols doctor [dir]                                      show which mojo-lsp-server would be used
+//	mojols stdlib [dir]                                      download the stdlib sources for the installed Mojo now
 //	mojols version
 package main
 
@@ -25,6 +26,7 @@ import (
 	"github.com/tdadadavid/mojols/server/internal/discover"
 	"github.com/tdadadavid/mojols/server/internal/proxy"
 	pkgroots "github.com/tdadadavid/mojols/server/internal/roots"
+	"github.com/tdadadavid/mojols/server/internal/stdlib"
 	"github.com/tdadadavid/mojols/server/internal/trace"
 )
 
@@ -42,6 +44,8 @@ func main() {
 		os.Exit(serve(args))
 	case "doctor":
 		os.Exit(doctor(args))
+	case "stdlib":
+		os.Exit(fetchStdlib(args))
 	case "version":
 		fmt.Println("mojols", fullVersion())
 	case "debug-parse": // undocumented: mojols' own parse as JSON
@@ -49,7 +53,7 @@ func main() {
 	case "debug-resolve": // undocumented: what each identifier resolves to
 		os.Exit(debugResolve(args))
 	default:
-		fmt.Fprintf(os.Stderr, "mojols: unknown command %q (want serve, doctor or version)\n", cmd)
+		fmt.Fprintf(os.Stderr, "mojols: unknown command %q (want serve, doctor, stdlib or version)\n", cmd)
 		os.Exit(2)
 	}
 }
@@ -73,6 +77,7 @@ func serve(args []string) int {
 	memLimit := fs.Int("memory-limit-mb", 3072, "recycle mojo-lsp-server when its resident memory passes this; -1 = never")
 	settle := fs.Bool("settle-requests", false, "hold a request on a file until mojo-lsp-server has parsed its latest edit (works around a crash in the server)")
 	useIndex := fs.Bool("index", true, "answer definition, references, rename and workspace symbols from mojols' own workspace index (works across files and while mojo-lsp-server is down)")
+	stdlibSrc := fs.String("stdlib-sources", "auto", "where to find the stdlib's sources for go to definition into std: auto (matching the installed Mojo, downloaded once from GitHub into the user cache), off, or a directory containing std/")
 	verifyRefs := fs.Bool("verify", true, "confirm references the index cannot resolve on its own with a separate mojo-lsp-server, started on demand and stopped when idle")
 	isolate := fs.Bool("isolate-completion", true, "run completion and signature help in a second mojo-lsp-server, so its crashes never reach the main one")
 	crashDir := fs.String("crash-dir", "", "save a replayable bundle (requests in flight, document texts) for every mojo-lsp-server crash here")
@@ -140,6 +145,7 @@ func serve(args []string) int {
 		IsolateCompletion: *isolate,
 		NoIndex:           !*useIndex,
 		NoVerify:          !*verifyRefs,
+		StdlibSources:     *stdlibSrc,
 		Resolve: func(roots []string) (proxy.Command, error) {
 			res, err := discover.Find(*backend, roots, discover.OSEnv())
 			if err != nil {
@@ -253,9 +259,60 @@ func doctor(args []string) int {
 	case "entries", "time":
 		fmt.Printf("  (scan stopped at its %s limit; some roots may be missing, pass them with -I)\n", r.Limit)
 	}
+	fmt.Println()
+	if err == nil {
+		v, verr := stdlib.DetectVersion(context.Background(), res.Path)
+		switch {
+		case verr != nil:
+			fmt.Printf("stdlib sources: %v\n", verr)
+		default:
+			fmt.Printf("stdlib sources for Mojo %s: ", v.Number)
+			if dir := stdlib.Cached(v); dir != "" {
+				fmt.Printf("cached in %s\n", dir)
+			} else {
+				fmt.Println("not downloaded yet (mojols fetches them from GitHub on first use; --stdlib-sources=off to opt out)")
+			}
+		}
+	}
 	if err != nil {
 		return 1
 	}
+	return 0
+}
+
+// fetchStdlib downloads (or finds cached) the stdlib sources for the Mojo
+// that serves the given workspace, and prints where they are.
+func fetchStdlib(args []string) int {
+	fs := flag.NewFlagSet("stdlib", flag.ContinueOnError)
+	backend := fs.String("backend", "", "explicit mojo-lsp-server path")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	dir := "."
+	if fs.NArg() > 0 {
+		dir = fs.Arg(0)
+	}
+	abs, _ := filepath.Abs(dir)
+	res, err := discover.Find(*backend, []string{abs}, discover.OSEnv())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mojols:", err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	v, err := stdlib.DetectVersion(ctx, res.Path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mojols:", err)
+		return 1
+	}
+	fmt.Printf("Mojo %s (%s)\n", v.Number, res.Path)
+	start := time.Now()
+	root, err := stdlib.Ensure(ctx, v, stdlib.Options{Token: os.Getenv("GITHUB_TOKEN")})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mojols:", err)
+		return 1
+	}
+	fmt.Printf("stdlib sources: %s (%v)\n", root, time.Since(start).Round(time.Millisecond))
 	return 0
 }
 
