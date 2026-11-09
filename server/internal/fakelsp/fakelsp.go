@@ -22,6 +22,7 @@ package fakelsp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -107,6 +108,10 @@ func Run(in io.Reader, out io.Writer, opts Options) int {
 			return 1 // stdin closed without exit, like the real server
 		}
 		if m.Method != "" && m.Method == opts.CrashOn && f.shouldCrash() {
+			fmt.Fprintln(os.Stderr, "I[00:00:00.000] unrelated log line")
+			fmt.Fprintln(os.Stderr, "Please submit a bug report to https://github.com/modular/modular/issues")
+			fmt.Fprintln(os.Stderr, "Stack dump:")
+			fmt.Fprintf(os.Stderr, "0.\tCrash handling %s in fakelsp\n", m.Method)
 			return 2
 		}
 		switch {

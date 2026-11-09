@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from m0_probe import Client  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
-OUT = REPO / ".probe" / "soak"
+OUT = REPO / ".probe" / "soak"  # replaced by --out
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 CLIENT_DEADLINE = 60.0
 
@@ -110,6 +110,7 @@ class Soak:
 
     def launch(self):
         argv = [self.args.mojols, "serve", "--log-level", "info", "--log-file", str(OUT / "mojols.log")]
+        argv += self.args.mojols_arg
         if self.args.backend:
             argv += ["--backend", self.args.backend]
         self.c = Client(argv)
@@ -358,8 +359,35 @@ class Soak:
         lines.insert(0, f"M1 soak: {'PASS' if ok else 'FAIL'}")
         return "\n".join(lines)
 
+    def crashes(self):
+        """Group the backend crash reports mojols logged by crash site."""
+        import ast
+        log = OUT / "mojols.log"
+        if not log.exists():
+            return []
+        reports = []
+        for line in log.read_text(errors="replace").splitlines():
+            if 'msg="backend crash output"' not in line or line < self.log_start:
+                continue
+            m = re.search(r'output=("(?:[^"\\]|\\.)*")', line)
+            if not m:
+                continue
+            try:
+                reports.append(ast.literal_eval(m.group(1)))
+            except (ValueError, SyntaxError):
+                reports.append(m.group(1))
+        sites = defaultdict(int)
+        for r in reports:
+            site = next((l for l in r.splitlines() if re.match(r"\s*0\.\s", l)), None) \
+                or next((l for l in r.splitlines() if "Assertion" in l or "LLVM ERROR" in l), None) \
+                or (r.splitlines() or ["(empty)"])[0]
+            sites[re.sub(r"0x[0-9a-f]+", "0x…", site.strip())[:160]] += 1
+        (OUT / "crashes.txt").write_text("\n\n".join(reports) + "\n")
+        return sorted(sites.items(), key=lambda kv: -kv[1])
+
     def run(self):
         OUT.mkdir(parents=True, exist_ok=True)
+        self.log_start = time.strftime("time=%Y-%m-%dT%H:%M:%S")
         self.prepare()
         self.launch()
         for _ in range(self.args.min_tabs):
@@ -383,6 +411,9 @@ class Soak:
         self.write_files()
         limit = self.args.memory_limit_mb
         summary = self.verdict(limit)
+        sites = self.crashes()
+        if sites:
+            summary += "\n\nbackend crash sites (full reports in crashes.txt):\n" + "\n".join(f"  {n:3}x  {site}" for site, n in sites)
         (OUT / "summary.txt").write_text(summary + "\n")
         print("\n" + summary, flush=True)
         self.call("shutdown", None)
@@ -404,7 +435,11 @@ def main():
     ap.add_argument("--memory-limit-mb", type=int, default=3072, help="the limit mojols runs with (its default)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--check-sync", action="store_true", help="with bin/fakelsp as --backend: compare its text with the editor's")
+    ap.add_argument("--out", default="soak", help="results go to .probe/<out>")
+    ap.add_argument("--mojols-arg", action="append", default=[], help="extra mojols flag, e.g. --mojols-arg=--refresh-dependents=false")
     run = ap.parse_args()
+    global OUT
+    OUT = REPO / ".probe" / run.out
     Soak(run).run()
 
 

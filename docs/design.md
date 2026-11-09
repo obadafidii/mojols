@@ -83,3 +83,18 @@ parses a file on first use, and a cold parse must not look like a hang.
 - ~31 MB per open document; closing returns about half. The cap cuts 40 open files from 1,252 MB to 737 MB.
 - Recycle: 184 ms from decision to a ready backend with 20 files reopened; no failed request; not counted as a restart. Exceeding the limit again 20 s later was held by the cooldown.
 - With the default 3 GB limit, recycling is a backstop; the cap does the everyday work.
+
+## M1 findings: 8-hour soak (scripts/soak.py --hours 8 --min-tabs 24), passed
+
+| Check | Result |
+| --- | --- |
+| Requests answered | 20,723 of 20,723 |
+| mojols memory | 14.9 MB median first hour, 15.3 MB last hour |
+| mojols goroutines | 8 first hour, max 9 last hour |
+| Backend memory | peak 1,022 MB (limit 3,072); 1,464 evictions; 0 recycles |
+| p95 first to last hour | hover 463 to 621 ms; completion 1,231 to 1,372 ms; definition 446 to 569 ms |
+
+- The official server crashed 32 times (20 segfaults, 14 aborts), ~4 per hour; none file-specific (no quarantine), none mojols hang-kills. mojols contained all of them: 0 unanswered, 32 ContentModified completions.
+- 27,384 dependent refreshes (every save re-checks importers, even for comment-only edits): likely the main latency cost, possibly a crash trigger.
+- Latency is well over the design targets under this load, with little drift.
+- Next: crash stack dumps are now always logged; compare 1-hour soaks with refresh on and off (same seed).

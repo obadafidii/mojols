@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,6 +47,41 @@ type backend struct {
 	exitErr error
 
 	stopping atomic.Bool // mojols asked it to exit: not a failure
+
+	tailMu sync.Mutex
+	tail   []string // last stderr lines, for crash reports
+}
+
+const stderrTail = 120
+
+func (b *backend) keepStderr(line string) {
+	b.tailMu.Lock()
+	defer b.tailMu.Unlock()
+	if len(b.tail) == stderrTail {
+		copy(b.tail, b.tail[1:])
+		b.tail = b.tail[:stderrTail-1]
+	}
+	b.tail = append(b.tail, line)
+}
+
+// crashReport returns the backend's final output, starting at its crash
+// banner (LLVM prints "PLEASE submit a bug report" then "Stack dump:") when
+// there is one, otherwise the last 40 lines.
+func (b *backend) crashReport() string {
+	b.tailMu.Lock()
+	defer b.tailMu.Unlock()
+	start := len(b.tail) - 40
+	for i, l := range b.tail {
+		if strings.Contains(l, "PLEASE submit a bug report") || strings.Contains(l, "Please submit a bug report") ||
+			strings.HasPrefix(l, "Stack dump:") || strings.Contains(l, "Assertion") || strings.Contains(l, "LLVM ERROR") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		start = 0
+	}
+	return strings.Join(b.tail[start:], "\n")
 }
 
 func startBackend(c Command, gen int, log *slog.Logger, tr *trace.Tracer,
@@ -86,6 +122,7 @@ func startBackend(c Command, gen int, log *slog.Logger, tr *trace.Tracer,
 		sc.Buffer(make([]byte, 64<<10), 1<<20)
 		for sc.Scan() {
 			blog.Debug("backend stderr", "line", sc.Text())
+			b.keepStderr(sc.Text())
 		}
 	}()
 	go b.writeLoop(stdin, blog)
@@ -108,6 +145,11 @@ func startBackend(c Command, gen int, log *slog.Logger, tr *trace.Tracer,
 			blog.Info("backend stopped", "uptime", time.Since(b.started).Round(time.Millisecond))
 		} else {
 			blog.Warn("backend exited", "reason", reason, "uptime", time.Since(b.started).Round(time.Millisecond))
+			if report := b.crashReport(); report != "" {
+				// Logged at any level: an upstream crash is only fixable with
+				// its stack dump, and it only exists in this output.
+				blog.Warn("backend crash output", "output", report)
+			}
 		}
 		onExit(b, reason)
 	}()

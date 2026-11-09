@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -462,5 +463,44 @@ func TestEditorHangupKillsBackend(t *testing.T) {
 	}
 	if err := syscall.Kill(pid, 0); err == nil {
 		t.Fatalf("backend %d orphaned", pid)
+	}
+}
+
+// syncBuffer is a goroutine-safe log sink.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// A crash's stack dump is the only way to get it fixed upstream, and it
+// only exists in the backend's stderr: it must be logged even at info level.
+func TestCrashOutputIsLoggedAtInfo(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "crashed")
+	logs := &syncBuffer{}
+	h := newHarness(t, []string{"MOJOLS_FAKE_CRASH_ON=textDocument/hover", "MOJOLS_FAKE_CRASH_ONCE_FILE=" + marker}, func(o *Options) {
+		o.Logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	})
+	h.initialize()
+	h.open("x")
+	h.hover()
+	h.waitReady(2)
+	out := logs.String()
+	if !strings.Contains(out, "backend crash output") || !strings.Contains(out, "Crash handling textDocument/hover in fakelsp") {
+		t.Fatalf("stack dump not in the info-level log:\n%s", out)
+	}
+	if strings.Contains(out, "unrelated log line") {
+		t.Fatalf("crash report should start at the crash banner:\n%s", out)
 	}
 }
