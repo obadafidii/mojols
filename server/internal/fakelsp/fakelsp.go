@@ -13,6 +13,8 @@
 //	MOJOLS_FAKE_GARBAGE_ON=<method>     answer <method> with an unparseable body
 //	MOJOLS_FAKE_EXIT_ON_START=1         exit(3) before reading anything
 //	MOJOLS_FAKE_CRASH_ON_TEXT=<marker>  segfault-like exit(139) when an opened or changed document contains <marker>
+//	MOJOLS_FAKE_PARSE_MS=<n>            publish diagnostics n ms after an open or change, like a real parse,
+//	                                    and count requests that arrive for a document still being parsed
 //
 // Custom methods for tests: fake/state (request) returns what the fake has
 // seen; fake/ask (request) makes the fake send workspace/configuration to the
@@ -25,8 +27,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
 	"github.com/tdadadavid/mojols/server/internal/text"
@@ -43,6 +47,7 @@ type Options struct {
 	GarbageOn     string
 	ExitOnStart   bool
 	CrashOnText   string
+	ParseDelay    time.Duration
 }
 
 // OptionsFromEnv reads Options from MOJOLS_FAKE_* variables.
@@ -54,6 +59,7 @@ func OptionsFromEnv() Options {
 		GarbageOn:     os.Getenv("MOJOLS_FAKE_GARBAGE_ON"),
 		ExitOnStart:   os.Getenv("MOJOLS_FAKE_EXIT_ON_START") == "1",
 		CrashOnText:   os.Getenv("MOJOLS_FAKE_CRASH_ON_TEXT"),
+		ParseDelay:    envMillis("MOJOLS_FAKE_PARSE_MS"),
 	}
 }
 
@@ -71,17 +77,19 @@ type State struct {
 	ClientResponses []json.RawMessage   `json:"clientResponses"`
 	Cancelled       []string            `json:"cancelled"`
 	Args            []string            `json:"args"`
-	Opens           map[string]int      `json:"opens"` // didOpen count per URI
+	Opens           map[string]int      `json:"opens"`    // didOpen count per URI
+	Overlaps        int                 `json:"overlaps"` // requests on a document still being parsed
 }
 
 type fake struct {
-	opts  Options
-	w     *jsonrpc.Writer
-	docs  *text.Store
-	mu    sync.Mutex
-	state State
-	hung  map[jsonrpc.ID]bool
-	asked int
+	opts    Options
+	w       *jsonrpc.Writer
+	docs    *text.Store
+	mu      sync.Mutex
+	state   State
+	hung    map[jsonrpc.ID]bool
+	asked   int
+	parsing map[string]int32 // uri -> version being parsed (ParseDelay)
 }
 
 // Run serves LSP on in/out until exit, returning the process exit code.
@@ -90,11 +98,12 @@ func Run(in io.Reader, out io.Writer, opts Options) int {
 		return 3
 	}
 	f := &fake{
-		opts:  opts,
-		w:     jsonrpc.NewWriter(out),
-		docs:  text.NewStore(),
-		state: State{PID: os.Getpid(), Docs: map[string]DocState{}, Args: os.Args[1:], Opens: map[string]int{}},
-		hung:  map[jsonrpc.ID]bool{},
+		opts:    opts,
+		w:       jsonrpc.NewWriter(out),
+		docs:    text.NewStore(),
+		state:   State{PID: os.Getpid(), Docs: map[string]DocState{}, Args: os.Args[1:], Opens: map[string]int{}},
+		hung:    map[jsonrpc.ID]bool{},
+		parsing: map[string]int32{},
 	}
 	r := jsonrpc.NewReader(in)
 	shutdown := false
@@ -178,6 +187,13 @@ func (f *fake) handle(m *jsonrpc.Message) {
 		_ = json.Unmarshal(m.Params, &p)
 	}
 	uri := p.TextDocument.URI
+	if m.IsRequest() && uri != "" {
+		f.mu.Lock()
+		if _, busy := f.parsing[uri]; busy {
+			f.state.Overlaps++
+		}
+		f.mu.Unlock()
+	}
 	switch m.Method {
 	case "initialize":
 		f.reply(m, map[string]any{
@@ -199,13 +215,16 @@ func (f *fake) handle(m *jsonrpc.Message) {
 		f.state.Opens[uri]++
 		f.mu.Unlock()
 		f.crashOnText(uri)
-		f.publishDiagnostics(uri)
+		f.parsed(uri)
 	case "textDocument/didChange":
 		_ = f.docs.Change(uri, p.TextDocument.Version, p.ContentChanges)
 		f.crashOnText(uri)
-		f.publishDiagnostics(uri)
+		f.parsed(uri)
 	case "textDocument/didClose":
 		f.docs.Close(uri)
+		f.mu.Lock()
+		delete(f.parsing, uri)
+		f.mu.Unlock()
 		f.publishDiagnostics(uri) // the real server clears a closed document's diagnostics
 	case "textDocument/hover":
 		d, ok := f.docs.Get(uri)
@@ -273,8 +292,48 @@ func (f *fake) publishDiagnostics(uri string) {
 			"severity": 2, "message": "fake warning",
 		})
 	}
-	n, _ := jsonrpc.NewNotification("textDocument/publishDiagnostics", map[string]any{"uri": uri, "diagnostics": diags})
+	params := map[string]any{"uri": uri, "diagnostics": diags}
+	if d, ok := f.docs.Get(uri); ok {
+		params["version"] = d.Version
+	}
+	n, _ := jsonrpc.NewNotification("textDocument/publishDiagnostics", params)
 	f.w.Write(n)
+}
+
+// parsed publishes diagnostics for uri now, or after ParseDelay, marking the
+// document busy until then, like a real parse.
+func (f *fake) parsed(uri string) {
+	if f.opts.ParseDelay == 0 {
+		f.publishDiagnostics(uri)
+		return
+	}
+	d, ok := f.docs.Get(uri)
+	if !ok {
+		return
+	}
+	f.mu.Lock()
+	f.parsing[uri] = d.Version
+	f.mu.Unlock()
+	go func(version int32) {
+		time.Sleep(f.opts.ParseDelay)
+		f.mu.Lock()
+		current := f.parsing[uri] == version
+		if current {
+			delete(f.parsing, uri)
+		}
+		f.mu.Unlock()
+		if current {
+			f.publishDiagnostics(uri)
+		}
+	}(d.Version)
+}
+
+func envMillis(name string) time.Duration {
+	n, err := strconv.Atoi(os.Getenv(name))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return time.Duration(n) * time.Millisecond
 }
 
 // crashOnText dies, like the real server's parser, on a poisoned document.

@@ -62,6 +62,9 @@ type Options struct {
 	RecycleDrain    time.Duration                // how long in-flight requests may finish before a recycle: 3s
 	RecycleCooldown time.Duration                // minimum time between recycles: 5m
 	SampleRSS       func(pid int) (int64, error) // defaults to SampleRSS (ps)
+
+	SettleRequests bool          // hold requests on a document until the backend has parsed its latest edit
+	SettleTimeout  time.Duration // longest a request is held: 3s
 }
 
 // DefaultTimeouts are deliberately generous: the official server parses a
@@ -99,6 +102,7 @@ func (o *Options) setDefaults() {
 	def(&o.MemoryCheck, 2*time.Second)
 	def(&o.RecycleDrain, 3*time.Second)
 	def(&o.RecycleCooldown, 5*time.Minute)
+	def(&o.SettleTimeout, 3*time.Second)
 	if o.MaxResidentDocs == 0 {
 		o.MaxResidentDocs = 20
 	}
@@ -168,8 +172,9 @@ type Status struct {
 	Evictions        int      `json:"evictions"`
 	Recycles         int      `json:"recycles"`
 	BackendRSSMB     int64    `json:"backendRssMB,omitempty"`
-	Goroutines       int      `json:"goroutines"` // mojols itself
-	HeapMB           float64  `json:"heapMB"`     // mojols itself
+	HeldRequests     int      `json:"heldRequests"` // requests held until their document settled
+	Goroutines       int      `json:"goroutines"`   // mojols itself
+	HeapMB           float64  `json:"heapMB"`       // mojols itself
 }
 
 // Server is one editor session.
@@ -234,6 +239,10 @@ type Server struct {
 	recycles    int
 	lastRecycle time.Time
 	backendRSS  int64
+
+	// Request settling (settle.go).
+	waiting map[string][]*pending
+	held    int
 }
 
 // New returns a server reading the editor's messages from in and writing to out.
@@ -252,6 +261,7 @@ func New(in io.Reader, out io.Writer, opts Options) *Server {
 		quarantine: map[string]*quarantined{},
 		changed:    map[string]bool{},
 		resident:   map[string]time.Time{},
+		waiting:    map[string][]*pending{},
 		lastUse:    map[string]time.Time{},
 	}
 	s.deps = newDepGraph(func(path string) (string, bool) {
@@ -430,14 +440,9 @@ func (s *Server) handleRequest(m *jsonrpc.Message) {
 		s.replyError(*m.ID, jsonrpc.CodeRequestFailed, "mojols: mojo-lsp-server is unavailable (degraded mode after repeated crashes); see the mojols log")
 		return
 	}
-	if q, probation := s.blockedLocked(docURIOf(m.Params)); q || probation {
+	if reply := s.blockedReplyLocked(*m.ID, docURIOf(m.Params)); reply != nil {
 		s.mu.Unlock()
-		name := fileName(docURIOf(m.Params))
-		if q {
-			s.replyError(*m.ID, jsonrpc.CodeRequestFailed, "mojols: "+name+" is quarantined because it crashes mojo-lsp-server; save a change to it to retry")
-		} else {
-			s.replyError(*m.ID, jsonrpc.CodeContentModified, "mojols: "+name+" is being re-checked after a backend crash; retry shortly")
-		}
+		s.write(reply)
 		return
 	}
 	if uri := docURIOf(m.Params); uri != "" {
@@ -454,10 +459,12 @@ func (s *Server) handleRequest(m *jsonrpc.Message) {
 	s.pending[p.id] = p
 	s.byClient[p.clientID] = p.id
 	p.timer = time.AfterFunc(timeout, func() { s.onTimeout(p.id, timeout) })
-	if s.ready {
-		s.dispatchLocked(p)
-	} else {
+	switch {
+	case !s.ready:
 		s.queue = append(s.queue, p)
+	case s.holdUntilSettledLocked(p):
+	default:
+		s.dispatchLocked(p)
 	}
 	s.mu.Unlock()
 }
@@ -557,13 +564,13 @@ func (s *Server) handleDocSync(m *jsonrpc.Message) {
 	case "textDocument/didOpen":
 		s.sendBackendLocked(m)
 		s.resident[td.URI] = time.Now()
-		s.health[td.URI] = &docHealth{gen: s.be.gen}
+		s.health[td.URI] = &docHealth{gen: s.be.gen, version: td.Version}
 		s.evictLocked(td.URI)
 	case "textDocument/didChange":
 		if isResident {
 			s.sendBackendLocked(m)
 			s.resident[td.URI] = time.Now()
-			s.health[td.URI] = &docHealth{gen: s.be.gen}
+			s.health[td.URI] = &docHealth{gen: s.be.gen, version: td.Version}
 		} else {
 			s.ensureResidentLocked(td.URI) // opens it with the text this change produced
 		}
@@ -720,7 +727,20 @@ func (s *Server) onBackendInitialized(gen int, result json.RawMessage) {
 		s.sendBackendLocked(n)
 	}
 	s.queuedNote = nil
+	// Queued requests may target documents this replay did not reopen:
+	// suspects and quarantined files get the reply they would get live, and
+	// documents beyond the residency cap are reopened first.
+	var blockedReplies []*jsonrpc.Message
 	for _, p := range s.queue {
+		uri := docURIOf(p.msg.Params)
+		if reply := s.blockedReplyLocked(p.clientID, uri); reply != nil {
+			s.removeLocked(p)
+			blockedReplies = append(blockedReplies, reply)
+			continue
+		}
+		if uri != "" {
+			s.ensureResidentLocked(uri)
+		}
 		s.dispatchLocked(p)
 	}
 	s.queue = nil
@@ -731,6 +751,7 @@ func (s *Server) onBackendInitialized(gen int, result json.RawMessage) {
 	if answerID != nil {
 		s.write(&jsonrpc.Message{ID: answerID, Result: answer})
 	}
+	s.sendAll(blockedReplies)
 	if wasDegraded {
 		s.showMessage(3, "mojols: mojo-lsp-server is back; full language features restored.")
 	}
@@ -745,6 +766,7 @@ func (s *Server) backendFailed(gen int, reason error) {
 		return
 	}
 	s.failedGen = gen
+	s.requeueWaitersLocked()
 	be := s.be
 	s.be = nil
 	s.ready = false
@@ -937,10 +959,11 @@ func (s *Server) onBackendMessage(b *backend, m *jsonrpc.Message) {
 		if current && m.Method == "textDocument/publishDiagnostics" {
 			var p struct {
 				URI         string            `json:"uri"`
+				Version     *int32            `json:"version"`
 				Diagnostics []json.RawMessage `json:"diagnostics"`
 			}
 			if json.Unmarshal(m.Params, &p) == nil {
-				s.onDiagnosedLocked(b.gen, p.URI)
+				s.onDiagnosedLocked(b.gen, p.URI, p.Version)
 				_, open := s.docs.Get(p.URI)
 				_, isResident := s.resident[p.URI]
 				if open && !isResident && len(p.Diagnostics) == 0 {
@@ -977,6 +1000,14 @@ func (s *Server) removeQueuedLocked(p *pending) {
 		if q == p {
 			s.queue = append(s.queue[:i], s.queue[i+1:]...)
 			return
+		}
+	}
+	for uri, ws := range s.waiting {
+		for i, q := range ws {
+			if q == p {
+				s.waiting[uri] = append(ws[:i], ws[i+1:]...)
+				return
+			}
 		}
 	}
 }
@@ -1076,6 +1107,7 @@ func (s *Server) Status() Status {
 		ResidentDocs:     len(s.resident),
 		Evictions:        s.evictions,
 		Recycles:         s.recycles,
+		HeldRequests:     s.held,
 		BackendRSSMB:     s.backendRSS >> 20,
 	}
 	if s.be != nil && s.be.cmd.Process != nil {
@@ -1193,4 +1225,17 @@ func minimalInitResult(version string) json.RawMessage {
 		"serverInfo": map[string]string{"name": "mojols", "version": version + " (degraded: no backend)"},
 	})
 	return out
+}
+
+// blockedReplyLocked returns the reply for a request on a quarantined or
+// re-checked document, or nil if the request may go to the backend.
+func (s *Server) blockedReplyLocked(id jsonrpc.ID, uri string) *jsonrpc.Message {
+	q, probation := s.blockedLocked(uri)
+	switch {
+	case q:
+		return errorMessage(id, jsonrpc.CodeRequestFailed, "mojols: "+fileName(uri)+" is quarantined because it crashes mojo-lsp-server; save a change to it to retry")
+	case probation:
+		return errorMessage(id, jsonrpc.CodeContentModified, "mojols: "+fileName(uri)+" is being re-checked after a backend crash; retry shortly")
+	}
+	return nil
 }

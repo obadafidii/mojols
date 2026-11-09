@@ -30,8 +30,9 @@ import (
 
 // docHealth tracks one document's latest text in the current backend.
 type docHealth struct {
-	gen       int  // generation the latest text was sent to
-	diagnosed bool // the backend published diagnostics for it since then
+	gen       int   // generation the latest text was sent to
+	version   int32 // document version of that text
+	diagnosed bool  // the backend published diagnostics for that version
 }
 
 type quarantined struct {
@@ -72,14 +73,18 @@ func (s *Server) sendDidOpenLocked(d text.Document) {
 		"textDocument": map[string]any{"uri": d.URI, "languageId": d.LanguageID, "version": d.Version, "text": d.Text},
 	})
 	s.sendBackendLocked(n)
-	s.health[d.URI] = &docHealth{gen: s.be.gen}
+	s.health[d.URI] = &docHealth{gen: s.be.gen, version: d.Version}
 	s.resident[d.URI] = time.Now()
 }
 
 // onDiagnosedLocked records that the backend finished with uri.
-func (s *Server) onDiagnosedLocked(gen int, uri string) {
-	if h := s.health[uri]; h != nil && h.gen == gen {
+// onDiagnosedLocked records diagnostics for uri. version is the document
+// version they were computed for, or nil if the backend did not say: then
+// they are assumed current.
+func (s *Server) onDiagnosedLocked(gen int, uri string, version *int32) {
+	if h := s.health[uri]; h != nil && h.gen == gen && (version == nil || *version >= h.version) {
 		h.diagnosed = true
+		s.releaseWaitersLocked(uri)
 	}
 	if s.probing == uri && s.be != nil && s.be.gen == gen {
 		s.log.Info("suspect document parsed cleanly", "uri", uri)
