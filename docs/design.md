@@ -98,3 +98,18 @@ parses a file on first use, and a cold parse must not look like a hang.
 - 27,384 dependent refreshes (every save re-checks importers, even for comment-only edits): likely the main latency cost, possibly a crash trigger.
 - Latency is well over the design targets under this load, with little drift.
 - Next: crash stack dumps are now always logged; compare 1-hour soaks with refresh on and off (same seed).
+
+## M1 findings: the crashes are completion, now isolated
+
+1-hour soaks on ordinary code (the 1.1.0 stdlib's tests), same seed:
+
+| Run | Main restarts | Completion-server crashes | p95 hover | p95 completion |
+| --- | --- | --- | --- | --- |
+| Baseline | 16 | n/a | 244-324 ms | 646-678 ms |
+| --settle-requests | 10 | n/a | 225-346 ms | 625-710 ms |
+| Completion isolated (default) | 0 | 8, contained | 336-344 ms | 877-1,154 ms |
+
+- Refresh on vs off (stdlib edits): 4 vs 3 crashes per hour, so refreshes are not the cause; they cost 15-25% latency.
+- Every captured crash was textDocument/completion. 3 of 6 bundles reproduce 3/3 on a bare mojo-lsp-server from one file and one request: completion mid-word in valid code (e.g. `assert_equal(ele|m[0], 1)`), including the `unknown decl symbol @std::@builtin::@value::@RegisterPassable` abort. Upstream bug; repro folders via scripts/replay_crash.py.
+- Completion now runs in a second, sacrificial backend (max 3 docs): a crash costs one empty, incomplete list; the main backend never restarts.
+- Cost to fix next: completion p95 +~250 ms (sidecar syncs only on request) and more ContentModified completions (28/h); forward edits to the sidecar live, retry once on ContentModified.
