@@ -112,16 +112,18 @@ parses a file on first use, and a cold parse must not look like a hang.
 - Refresh on vs off (stdlib edits): 4 vs 3 crashes per hour, so refreshes are not the cause; they cost 15-25% latency.
 - Every captured crash was textDocument/completion. 3 of 6 bundles reproduce 3/3 on a bare mojo-lsp-server from one file and one request: completion mid-word in valid code (e.g. `assert_equal(ele|m[0], 1)`), including the `unknown decl symbol @std::@builtin::@value::@RegisterPassable` abort. Upstream bug; repro folders via scripts/replay_crash.py.
 - Completion now runs in a second, sacrificial backend (max 3 docs): a crash costs one empty, incomplete list; the main backend never restarts.
-- Cost to fix next: completion p95 +~250 ms (sidecar syncs only on request) and more ContentModified completions (28/h); forward edits to the sidecar live, retry once on ContentModified.
+- Completion isolation costs ~115 ms at the median. Three ways of keeping the sidecar's copy current were measured; on-request sync (the simplest) stays.
 
-Completion latency over every request (1-hour soaks, 619-630 completions each):
+Completion latency over every request (1-hour soaks, 619-630 completions each, same seed):
 
 | Run | p50 | p90 | p95 | p99 | ContentModified |
 | --- | --- | --- | --- | --- | --- |
 | Before isolation | 304 ms | 573 ms | 701 ms | 2,295 ms | 6-16 |
-| Isolated | 420 ms | 743 ms | 883 ms | 2,198 ms | 28 |
-| Isolated + mirroring every keystroke | 495 ms | 731 ms | 946 ms | 1,544 ms | 0 |
+| Isolated, synced on request (kept) | 420 ms | 743 ms | 883 ms | 2,198 ms | 28 |
+| Isolated, every keystroke mirrored | 495 ms | 731 ms | 946 ms | 1,544 ms | 0 |
+| Isolated, mirrored after a 300 ms pause | 490 ms | 726 ms | 1,148 ms | 2,178 ms | 12 (17 retried) |
 
 - Hover and definition are unchanged by isolation (p50 1 ms, p95 ~300-330 ms).
-- Mirroring every keystroke kept the sidecar re-parsing (9,373 mirrored edits/h): no more ContentModified and a better tail, but a slower median. Now mirrored after a 300 ms pause in typing; to be measured.
+- Mirroring (9,373 edits/h per keystroke, 862/h debounced) keeps the sidecar re-parsing, which competes with the main backend and with completion's own re-parse: +70 ms at the median either way. Only per-keystroke mirroring helped the tail, and it doubles parsing work on every edit. Not worth it.
+- ContentModified on completion is now retried once in the sidecar; the remaining ones are an empty, incomplete list the editor re-requests on the next keystroke.
 - Even before isolation, completion's median was 304 ms: the official server re-parses at the cursor for every completion. The 250 ms target needs mojols' own completion from its index (M3), not routing.

@@ -42,11 +42,6 @@ const (
 	sidecarCrashLimit  = 4
 	sidecarPause       = 2 * time.Minute
 	sidecarGenBase     = 1000 // its generations are logged as 1001, 1002, ...
-	// sidecarMirrorDelay waits for a pause in typing before updating the
-	// sidecar. Mirroring every keystroke kept it re-parsing continuously:
-	// a 1-hour soak measured completion p50 495 ms against 420 ms without
-	// mirroring (p99 improved, 2,198 to 1,544 ms).
-	sidecarMirrorDelay = 300 * time.Millisecond
 )
 
 type sideDoc struct {
@@ -81,13 +76,11 @@ type sidecar struct {
 	paused   time.Time // no completion until then
 	memo     map[string]bool
 
-	crashCount, memoHits, mirrored, retries int
-	mirrorTimers                            map[string]*time.Timer
+	crashCount, memoHits, retries int
 }
 
 func newSidecar(s *Server) *sidecar {
-	return &sidecar{s: s, pending: map[int64]*sidePending{}, docs: map[string]*sideDoc{}, memo: map[string]bool{},
-		mirrorTimers: map[string]*time.Timer{}}
+	return &sidecar{s: s, pending: map[int64]*sidePending{}, docs: map[string]*sideDoc{}, memo: map[string]bool{}}
 }
 
 // emptyResult is what an isolated request gets when its backend could not
@@ -380,43 +373,23 @@ func (c *sidecar) onExit(b *backend, err error) {
 	}
 }
 
-// mirror keeps a document the sidecar holds in step with the editor once
-// typing pauses, so its re-parse runs before completion is asked for. It
-// sends the full current text, compared by hash, so mirrors that race each
-// other still converge on the latest text. A document the editor closed is
-// closed in the sidecar too. A completion request always syncs first, so a
-// pending mirror never leaves it with stale text.
-func (c *sidecar) mirror(uri string) {
+// forget closes uri in the sidecar once the editor has closed it. Edits are
+// deliberately not mirrored: three 1-hour soaks measured completion p50 at
+// 420 ms when the sidecar syncs only on request, 495 ms mirroring every
+// keystroke and 490 ms mirroring after a 300 ms pause (p95 883, 946 and
+// 1,148 ms). Any extra parsing there competes with the main backend and
+// with completion's own re-parse at the cursor.
+func (c *sidecar) forget(uri string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.be == nil || c.docs[uri] == nil {
 		return
 	}
-	if t := c.mirrorTimers[uri]; t != nil {
-		t.Stop()
-	}
-	c.mirrorTimers[uri] = time.AfterFunc(sidecarMirrorDelay, func() { c.mirrorNow(uri) })
-}
-
-func (c *sidecar) mirrorNow(uri string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.mirrorTimers, uri)
-	if c.be == nil || c.docs[uri] == nil {
+	if _, open := c.s.docs.Get(uri); open {
 		return
 	}
-	d, open := c.s.docs.Get(uri)
-	if !open {
-		c.sendLocked(notification("textDocument/didClose", map[string]any{"textDocument": map[string]any{"uri": uri}}))
-		delete(c.docs, uri)
-		return
-	}
-	if c.docs[uri].hash != contentHash(d.Text) {
-		used := c.docs[uri].used // a mirror is not a use: keep LRU order
-		c.syncLocked(d, true)
-		c.docs[uri].used = used
-		c.mirrored++
-	}
+	c.sendLocked(notification("textDocument/didClose", map[string]any{"textDocument": map[string]any{"uri": uri}}))
+	delete(c.docs, uri)
 }
 
 func (c *sidecar) stop() {
@@ -435,7 +408,6 @@ type SidecarStatus struct {
 	MemoHits int  `json:"memoHits"`
 	Paused   bool `json:"paused"`
 	Docs     int  `json:"documents"`
-	Mirrored int  `json:"mirroredEdits"`
 	Retries  int  `json:"retries"`
 }
 
@@ -443,5 +415,5 @@ func (c *sidecar) status() SidecarStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return SidecarStatus{Running: c.be != nil, Crashes: c.crashCount, MemoHits: c.memoHits, Paused: time.Now().Before(c.paused),
-		Docs: len(c.docs), Mirrored: c.mirrored, Retries: c.retries}
+		Docs: len(c.docs), Retries: c.retries}
 }

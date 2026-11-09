@@ -560,7 +560,7 @@ func (s *Server) handleDocSync(m *jsonrpc.Message) {
 		if s.opts.IsolateCompletion {
 			// Deferred first, so it runs after the store close below: the
 			// sidecar must see the document gone to close it too.
-			defer func() { go s.side.mirror(td.URI) }()
+			defer func() { go s.side.forget(td.URI) }()
 		}
 		// Closed after the quarantine rules ran, so they still see the text.
 		defer s.docs.Close(td.URI)
@@ -570,8 +570,6 @@ func (s *Server) handleDocSync(m *jsonrpc.Message) {
 	}
 	if m.Method == "textDocument/didSave" {
 		s.noteChangedLocked(td.URI) // the file on disk changed: its importers are stale
-	} else if s.opts.IsolateCompletion && m.Method != "textDocument/didClose" {
-		go s.side.mirror(td.URI)
 	}
 	if s.handleBlockedSyncLocked(m.Method, td.URI) {
 		return
