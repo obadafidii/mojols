@@ -85,6 +85,7 @@ mojols [serve] [flags] [-- extra mojo-lsp-server args]
   --max-resident-docs N       documents open in mojo-lsp-server at once (default 20; -1 = no cap)
   --memory-limit-mb N         recycle mojo-lsp-server above this resident memory (default 3072; -1 = never)
   --settle-requests           hold a request on a file until the server has parsed its latest edit (experimental)
+  --crash-dir DIR             save a replayable bundle for every mojo-lsp-server crash (see scripts/replay_crash.py)
   --log-file PATH     logs (default: stderr; stdout carries the protocol)
   --log-level LEVEL   debug | info | warn | error
   --trace-file PATH   record every message as JSON lines

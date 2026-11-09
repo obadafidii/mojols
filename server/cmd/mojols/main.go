@@ -68,6 +68,7 @@ func serve(args []string) int {
 	maxResident := fs.Int("max-resident-docs", 20, "documents kept open in mojo-lsp-server at once (~31 MB each); others reopen when touched; -1 = no cap")
 	memLimit := fs.Int("memory-limit-mb", 3072, "recycle mojo-lsp-server when its resident memory passes this; -1 = never")
 	settle := fs.Bool("settle-requests", false, "hold a request on a file until mojo-lsp-server has parsed its latest edit (works around a crash in the server)")
+	crashDir := fs.String("crash-dir", "", "save a replayable bundle (requests in flight, document texts) for every mojo-lsp-server crash here")
 	var extra []string
 	for i, a := range args {
 		if a == "--" {
@@ -84,6 +85,12 @@ func serve(args []string) int {
 	if strings.ContainsRune(*backend, filepath.Separator) && !filepath.IsAbs(*backend) {
 		if abs, err := filepath.Abs(*backend); err == nil {
 			*backend = abs
+		}
+	}
+
+	if *crashDir != "" {
+		if abs, err := filepath.Abs(*crashDir); err == nil {
+			*crashDir = abs
 		}
 	}
 
@@ -122,6 +129,7 @@ func serve(args []string) int {
 		MaxResidentDocs: *maxResident,
 		MemoryLimitMB:   *memLimit,
 		SettleRequests:  *settle,
+		CrashDir:        *crashDir,
 		Resolve: func(roots []string) (proxy.Command, error) {
 			res, err := discover.Find(*backend, roots, discover.OSEnv())
 			if err != nil {

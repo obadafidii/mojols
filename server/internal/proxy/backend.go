@@ -19,13 +19,13 @@ import (
 
 // Command is how to start one backend process.
 type Command struct {
-	Path string
-	Args []string
+	Path string   `json:"path"`
+	Args []string `json:"args"`
 	// IncludeDirs are the -I dirs in Args, for resolving imports when
 	// deciding which documents a changed file affects.
-	IncludeDirs []string
-	Env         []string // added to the inherited environment
-	Dir         string
+	IncludeDirs []string `json:"includeDirs"`
+	Env         []string `json:"env,omitempty"` // added to the inherited environment
+	Dir         string   `json:"dir"`
 }
 
 // backend is one generation of mojo-lsp-server.

@@ -65,6 +65,8 @@ type Options struct {
 
 	SettleRequests bool          // hold requests on a document until the backend has parsed its latest edit
 	SettleTimeout  time.Duration // longest a request is held: 3s
+
+	CrashDir string // save a replayable bundle for every backend crash here
 }
 
 // DefaultTimeouts are deliberately generous: the official server parses a
@@ -140,6 +142,7 @@ type pending struct {
 	msg      *jsonrpc.Message
 	timer    *time.Timer
 	internal chan *jsonrpc.Message // non-nil for requests mojols itself sent
+	sent     time.Time             // when it went to the backend
 }
 
 // serverReq is a request from the backend that mojols forwarded to the editor.
@@ -243,6 +246,8 @@ type Server struct {
 	// Request settling (settle.go).
 	waiting map[string][]*pending
 	held    int
+
+	lastCmd Command // the backend command of the current generation, for crash bundles
 }
 
 // New returns a server reading the editor's messages from in and writing to out.
@@ -473,6 +478,7 @@ func (s *Server) handleRequest(m *jsonrpc.Message) {
 // mojols-assigned id.
 func (s *Server) dispatchLocked(p *pending) {
 	p.gen = s.be.gen
+	p.sent = time.Now()
 	out := *p.msg
 	id := jsonrpc.NumberID(p.id)
 	out.ID = &id
@@ -648,6 +654,9 @@ func (s *Server) launch() {
 		return
 	}
 	s.deps.setRoots(cmd.IncludeDirs)
+	s.mu.Lock()
+	s.lastCmd = cmd
+	s.mu.Unlock()
 	be, err := startBackend(cmd, gen, s.log, s.opts.Tracer, s.onBackendMessage, s.countMalformed, func(b *backend, err error) {
 		s.backendFailed(b.gen, err)
 	})
@@ -766,12 +775,16 @@ func (s *Server) backendFailed(gen int, reason error) {
 		return
 	}
 	s.failedGen = gen
-	s.requeueWaitersLocked()
 	be := s.be
+	planned := s.plannedGen == gen
+	if !planned && !s.shutdown {
+		// Snapshot before anything in flight is cleared.
+		go s.recordCrash(s.crashBundleLocked(gen, be, reason))
+	}
+	s.requeueWaitersLocked()
 	s.be = nil
 	s.ready = false
 	s.resident = map[string]time.Time{}
-	planned := s.plannedGen == gen
 	if planned {
 		s.recycles++
 		s.lastRecycle = time.Now()
