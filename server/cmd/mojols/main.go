@@ -44,6 +44,10 @@ func main() {
 		os.Exit(doctor(args))
 	case "version":
 		fmt.Println("mojols", fullVersion())
+	case "debug-parse": // undocumented: mojols' own parse as JSON
+		os.Exit(debugParse(args))
+	case "debug-resolve": // undocumented: what each identifier resolves to
+		os.Exit(debugResolve(args))
 	default:
 		fmt.Fprintf(os.Stderr, "mojols: unknown command %q (want serve, doctor or version)\n", cmd)
 		os.Exit(2)
@@ -68,6 +72,7 @@ func serve(args []string) int {
 	maxResident := fs.Int("max-resident-docs", 20, "documents kept open in mojo-lsp-server at once (~31 MB each); others reopen when touched; -1 = no cap")
 	memLimit := fs.Int("memory-limit-mb", 3072, "recycle mojo-lsp-server when its resident memory passes this; -1 = never")
 	settle := fs.Bool("settle-requests", false, "hold a request on a file until mojo-lsp-server has parsed its latest edit (works around a crash in the server)")
+	useIndex := fs.Bool("index", true, "answer definition, references, rename and workspace symbols from mojols' own workspace index (works across files and while mojo-lsp-server is down)")
 	isolate := fs.Bool("isolate-completion", true, "run completion and signature help in a second mojo-lsp-server, so its crashes never reach the main one")
 	crashDir := fs.String("crash-dir", "", "save a replayable bundle (requests in flight, document texts) for every mojo-lsp-server crash here")
 	var extra []string
@@ -132,6 +137,7 @@ func serve(args []string) int {
 		SettleRequests:    *settle,
 		CrashDir:          *crashDir,
 		IsolateCompletion: *isolate,
+		NoIndex:           !*useIndex,
 		Resolve: func(roots []string) (proxy.Command, error) {
 			res, err := discover.Find(*backend, roots, discover.OSEnv())
 			if err != nil {

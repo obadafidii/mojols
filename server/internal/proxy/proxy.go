@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/tdadadavid/mojols/server/internal/discover"
+	"github.com/tdadadavid/mojols/server/internal/index"
 	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
 	"github.com/tdadadavid/mojols/server/internal/text"
 	"github.com/tdadadavid/mojols/server/internal/trace"
@@ -68,6 +69,9 @@ type Options struct {
 
 	CrashDir string // save a replayable bundle for every backend crash here
 
+	// NoIndex turns off mojols' own index: definition, references, rename
+	// and workspace symbols then come from mojo-lsp-server alone.
+	NoIndex bool
 	// IsolateCompletion runs completion and signature help in a second,
 	// sacrificial backend (sidecar.go).
 	IsolateCompletion bool
@@ -255,6 +259,8 @@ type Server struct {
 	lastCmd Command // the backend command of the current generation, for crash bundles
 
 	side *sidecar
+	// ix is mojols' own workspace index (nil with Options.NoIndex).
+	ix *index.Index
 }
 
 // New returns a server reading the editor's messages from in and writing to out.
@@ -277,6 +283,9 @@ func New(in io.Reader, out io.Writer, opts Options) *Server {
 		lastUse:    map[string]time.Time{},
 	}
 	s.side = newSidecar(s)
+	if !opts.NoIndex {
+		s.ix = index.New(nil)
+	}
 	s.deps = newDepGraph(func(path string) (string, bool) {
 		for _, d := range s.docs.Snapshot() {
 			if p, ok := uriToPath(d.URI); ok && p == path {
@@ -406,10 +415,30 @@ func (s *Server) handleClient(m *jsonrpc.Message) {
 			s.mu.Lock()
 			for _, c := range p.Changes {
 				s.noteChangedLocked(c.URI)
+				if path, ok := uriToPath(c.URI); ok && s.ix != nil {
+					s.ix.Changed(path)
+				}
 			}
 			s.mu.Unlock()
 		}
 		// Also forwarded below, in case the backend ever watches files itself.
+	}
+	if s.ix != nil && m.IsRequest() && indexMethods[m.Method] {
+		go func() {
+			handled := false
+			defer func() {
+				// A bug in the index must cost this answer, never the session.
+				if r := recover(); r != nil {
+					s.log.Error("index query failed; asking the backend", "method", m.Method, "panic", r)
+					handled = false
+				}
+				if !handled {
+					s.handleRequest(m)
+				}
+			}()
+			handled = s.handleIndexed(m)
+		}()
+		return
 	}
 	if m.IsNotification() {
 		s.mu.Lock()
@@ -437,6 +466,9 @@ func (s *Server) handleInitialize(m *jsonrpc.Message) {
 	id := *m.ID
 	s.initID = &id
 	s.roots = workspaceRoots(m.Params)
+	if s.ix != nil {
+		s.ix.SetWorkspace(s.roots)
+	}
 	s.mu.Unlock()
 	s.log.Info("initialize", "roots", s.roots)
 	go s.launch()
@@ -556,6 +588,7 @@ func (s *Server) handleDocSync(m *jsonrpc.Message) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.indexDocLocked(m.Method, td.URI)
 	if m.Method == "textDocument/didClose" {
 		if s.opts.IsolateCompletion {
 			// Deferred first, so it runs after the store close below: the
@@ -672,6 +705,9 @@ func (s *Server) launch() {
 		return
 	}
 	s.deps.setRoots(cmd.IncludeDirs)
+	if s.ix != nil {
+		s.ix.SetRoots(cmd.IncludeDirs)
+	}
 	s.mu.Lock()
 	s.lastCmd = cmd
 	s.mu.Unlock()
@@ -719,7 +755,7 @@ func (s *Server) onBackendInitialized(gen int, result json.RawMessage) {
 	var answerID *jsonrpc.ID
 	var answer json.RawMessage
 	if s.initResult == nil {
-		s.initResult = rewriteInitResult(result, s.opts.Version)
+		s.initResult = rewriteInitResult(result, s.opts.Version, s.ix != nil)
 		s.docs.SetEncoding(text.ParseEncoding(positionEncoding(result)))
 		answerID, answer = s.initID, s.initResult
 		s.initID = nil
@@ -881,7 +917,7 @@ func (s *Server) backendFailed(gen int, reason error) {
 		if s.initID != nil {
 			// Never leave the editor waiting on initialize: answer with the
 			// minimal capabilities mojols can honour on its own.
-			s.initResult = minimalInitResult(s.opts.Version)
+			s.initResult = minimalInitResult(s.opts.Version, s.ix != nil)
 			replies = append(replies, &jsonrpc.Message{ID: s.initID, Result: s.initResult})
 			s.initID = nil
 			s.phase = phaseRunning
@@ -1232,10 +1268,18 @@ func positionEncoding(result json.RawMessage) string {
 	return r.Capabilities.PositionEncoding
 }
 
-func rewriteInitResult(result json.RawMessage, version string) json.RawMessage {
+func rewriteInitResult(result json.RawMessage, version string, indexed bool) json.RawMessage {
 	var r map[string]json.RawMessage
 	if json.Unmarshal(result, &r) != nil || r == nil {
 		r = map[string]json.RawMessage{}
+	}
+	if indexed {
+		var caps map[string]any
+		if json.Unmarshal(r["capabilities"], &caps) != nil || caps == nil {
+			caps = map[string]any{}
+		}
+		indexCapabilities(caps)
+		r["capabilities"], _ = json.Marshal(caps)
 	}
 	backendName := "mojo-lsp-server"
 	var info struct {
@@ -1256,12 +1300,17 @@ func rewriteInitResult(result json.RawMessage, version string) json.RawMessage {
 	return out
 }
 
-func minimalInitResult(version string) json.RawMessage {
+func minimalInitResult(version string, indexed bool) json.RawMessage {
+	caps := map[string]any{
+		"textDocumentSync": map[string]any{"openClose": true, "change": 2, "save": true},
+	}
+	if indexed {
+		// mojols' own index needs no backend.
+		indexCapabilities(caps)
+	}
 	out, _ := json.Marshal(map[string]any{
-		"capabilities": map[string]any{
-			"textDocumentSync": map[string]any{"openClose": true, "change": 2, "save": true},
-		},
-		"serverInfo": map[string]string{"name": "mojols", "version": version + " (degraded: no backend)"},
+		"capabilities": caps,
+		"serverInfo":   map[string]string{"name": "mojols", "version": version + " (degraded: no backend)"},
 	})
 	return out
 }

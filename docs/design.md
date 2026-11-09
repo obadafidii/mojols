@@ -127,3 +127,38 @@ Completion latency over every request (1-hour soaks, 619-630 completions each, s
 - Mirroring (9,373 edits/h per keystroke, 862/h debounced) keeps the sidecar re-parsing, which competes with the main backend and with completion's own re-parse: +70 ms at the median either way. Only per-keystroke mirroring helped the tail, and it doubles parsing work on every edit. Not worth it.
 - ContentModified on completion is now retried once in the sidecar; the remaining ones are an empty, incomplete list the editor re-requests on the next keystroke.
 - Even before isolation, completion's median was 304 ms: the official server re-parses at the cursor for every completion. The 250 ms target needs mojols' own completion from its index (M3), not routing.
+
+## M3: mojols' own syntax layer and index (in progress)
+
+`internal/syntax` is a hand-written, error-tolerant Mojo lexer and parser
+in Go (no cgo, no tree-sitter, so mojols stays one static binary).
+`internal/index` resolves every identifier across the workspace. The proxy
+answers definition, references, rename and workspace symbols from it.
+
+Validation against the official server (Mojo 1.1.0, all 579 files of the
+1.1 stdlib and its tests):
+
+| Check | Result |
+| --- | --- |
+| Parser: panics / illegal tokens | 0 / 0 (fuzzed: 3M lexer, 1.76M parser executions) |
+| Outline vs documentSymbol | 10,506 of 10,507 symbols (the other is a synthesized closure `__call__`) |
+| Parse time, whole corpus (5.9 MB) | ~180 ms on one core |
+| Definition, 158,789 occurrences | precision 98.99%, recall 97.09%, 45 disagreements |
+| References, 6,456 stdlib symbols | 93.9% exactly the server's set; 24 wrong refs, 1,671 missing (3.5%) of 47,076 |
+| References latency via mojols | cold 349 ms (lists and parses the workspace), warm p50 1 ms, p95 2 ms |
+
+- Ground truth: `scripts/oracle_definitions.py` asks the official server's
+  definition at every occurrence (the stdlib sources resolve across files
+  inside themselves); `scripts/score_resolver.py` and `scripts/refs_gate.py`
+  score against it.
+- Oracle blind spots, not counted as errors: keyword arguments (the server
+  never resolves them), generic trait dispatch (`writer.write` on a
+  `Some[Writer]`), `comptime for` loop variables, implicit conversions
+  (`if x:` resolving to `__bool__`).
+- Upstream quirks found: comptime declaration ranges start at column 0;
+  `out` arguments and captures are reported at their def line; `except X:`
+  binds X; no definition into binary packages (std from user code).
+- Missing references are members reached through generic types
+  (`node[].left` through `Pointer[Node]`, `opt.value()` on `Optional[T]`,
+  `x.cast[...]` on SIMD expressions). Next: type arguments in the resolver,
+  then confirming what remains with the official server in the background.
