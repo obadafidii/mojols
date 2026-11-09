@@ -68,6 +68,7 @@ func serve(args []string) int {
 	maxResident := fs.Int("max-resident-docs", 20, "documents kept open in mojo-lsp-server at once (~31 MB each); others reopen when touched; -1 = no cap")
 	memLimit := fs.Int("memory-limit-mb", 3072, "recycle mojo-lsp-server when its resident memory passes this; -1 = never")
 	settle := fs.Bool("settle-requests", false, "hold a request on a file until mojo-lsp-server has parsed its latest edit (works around a crash in the server)")
+	isolate := fs.Bool("isolate-completion", true, "run completion and signature help in a second mojo-lsp-server, so its crashes never reach the main one")
 	crashDir := fs.String("crash-dir", "", "save a replayable bundle (requests in flight, document texts) for every mojo-lsp-server crash here")
 	var extra []string
 	for i, a := range args {
@@ -122,14 +123,15 @@ func serve(args []string) int {
 	}
 
 	srv := proxy.New(os.Stdin, os.Stdout, proxy.Options{
-		Logger:          logger,
-		Tracer:          tracer,
-		Version:         fullVersion(),
-		NoRefresh:       !*refresh,
-		MaxResidentDocs: *maxResident,
-		MemoryLimitMB:   *memLimit,
-		SettleRequests:  *settle,
-		CrashDir:        *crashDir,
+		Logger:            logger,
+		Tracer:            tracer,
+		Version:           fullVersion(),
+		NoRefresh:         !*refresh,
+		MaxResidentDocs:   *maxResident,
+		MemoryLimitMB:     *memLimit,
+		SettleRequests:    *settle,
+		CrashDir:          *crashDir,
+		IsolateCompletion: *isolate,
 		Resolve: func(roots []string) (proxy.Command, error) {
 			res, err := discover.Find(*backend, roots, discover.OSEnv())
 			if err != nil {

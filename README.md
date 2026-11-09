@@ -23,6 +23,7 @@ Design doc: [Mojo LSP: Design Doc](https://claude.ai/artifact/9rWQUQFcebHzUmnJzX
 | Package roots inferred and passed as `-I` (parent of every top-level package and `.mojopkg`), re-scanned before each backend start; stdlib copies and environments are never added | `internal/roots` tests, `mojols doctor` |
 | Saving a file, or changing it on disk (watchers registered with the editor), re-checks every open file that imports it, transitively | `TestSaveRefreshesTransitiveDependents`, `TestDiskChangeRefreshesDependents`, `TestNewImportIsFollowed`, `scripts/invalidation_probe.py` |
 | Memory: at most 20 documents open in the backend (measured ~31 MB each), least recently used reopened on touch with their current text and their diagnostics kept; above 3 GB the backend is recycled without failing a request | `TestResidencyCapEvictsLeastRecentlyUsed`, `TestEditsToEvictedDocumentSurvive`, `TestRecycleOverMemoryLimitFailsNothing`, `scripts/memory_probe.py` |
+| Completion and signature help run in a second, sacrificial mojo-lsp-server (they caused every observed crash): a crash costs one empty, incomplete completion list, never the main server; a crashing completion is not retried; repeated crashes pause completion for 2 minutes | `TestCompletionCrashLeavesTheMainBackendAlone`, `TestRepeatedCompletionCrashesPause`, `scripts/replay_crash.py` |
 | UTF-16/UTF-8/UTF-32 positions, incremental edits | table tests + `FuzzOffset` against a reference implementation |
 | Strict JSON-RPC framing and decoding | table tests + `FuzzReader` |
 | `mojols doctor`, `mojols/status`, `--trace-file` session recording | manual, `scripts/m0_probe.py` |
@@ -86,6 +87,7 @@ mojols [serve] [flags] [-- extra mojo-lsp-server args]
   --memory-limit-mb N         recycle mojo-lsp-server above this resident memory (default 3072; -1 = never)
   --settle-requests           hold a request on a file until the server has parsed its latest edit (experimental)
   --crash-dir DIR             save a replayable bundle for every mojo-lsp-server crash (see scripts/replay_crash.py)
+  --isolate-completion=false  run completion in the main mojo-lsp-server instead of a separate one
   --log-file PATH     logs (default: stderr; stdout carries the protocol)
   --log-level LEVEL   debug | info | warn | error
   --trace-file PATH   record every message as JSON lines

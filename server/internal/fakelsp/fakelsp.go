@@ -249,6 +249,11 @@ func (f *fake) handle(m *jsonrpc.Message) {
 			id := c.ID
 			f.w.Write(jsonrpc.NewErrorResponse(&id, jsonrpc.NewError(jsonrpc.CodeRequestCancelled, "cancelled")))
 		}
+	case "textDocument/completion":
+		d, _ := f.docs.Get(uri)
+		f.reply(m, map[string]any{"isIncomplete": false, "items": []any{map[string]any{"label": "fake:" + d.Text}}})
+	case "textDocument/signatureHelp":
+		f.reply(m, map[string]any{"signatures": []any{map[string]any{"label": "f()"}}})
 	case "fake/state":
 		f.mu.Lock()
 		st := f.state

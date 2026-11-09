@@ -259,6 +259,8 @@ class Soak:
             "evictions": st.get("evictions", 0),
             "refreshes": st.get("dependentRefreshes", 0),
             "quarantined": len(st.get("quarantined") or []),
+            "completion_crashes": (st.get("completionBackend") or {}).get("crashes", 0),
+            "completion_memo_hits": (st.get("completionBackend") or {}).get("memoHits", 0),
             "timeouts": st.get("timeouts", 0),
             "pending": st.get("pendingRequests", 0),
             "unanswered": self.unanswered,
@@ -295,7 +297,7 @@ class Soak:
             p95s.append(f"{m.split('/')[1]} {v*1000:.0f}" if v is not None else f"{m.split('/')[1]} -")
         print(f"[{row['t_min']:7.1f} min] mojols {row['mojols_rss_mb']:5.1f} MB, {row['goroutines']} goroutines | "
               f"backend {row['backend_rss_mb']:6.0f} MB, {row['resident']} resident | "
-              f"restarts {row['restarts']} recycles {row['recycles']} unanswered {row['unanswered']} | "
+              f"restarts {row['restarts']} recycles {row['recycles']} completion crashes {row['completion_crashes']} unanswered {row['unanswered']} | "
               f"p95 ms (10 min): {', '.join(p95s)}", flush=True)
 
     def write_files(self):
@@ -350,7 +352,9 @@ class Soak:
         total = sum(len(v) for v in self.lat.values())
         lines.append("")
         lines.append(f"duration {dur/3600:.2f} h, {total} requests, actions {dict(self.actions)}")
-        lines.append(f"backend restarts {self.samples[-1]['restarts']}, recycles {self.samples[-1]['recycles']}, "
+        lines.append(f"completion backend crashes {self.samples[-1]['completion_crashes']} (contained), "
+                     f"memo hits {self.samples[-1]['completion_memo_hits']}")
+        lines.append(f"main backend restarts {self.samples[-1]['restarts']}, recycles {self.samples[-1]['recycles']}, "
                      f"quarantined {self.samples[-1]['quarantined']}, evictions {self.samples[-1]['evictions']}, "
                      f"dependent refreshes {self.samples[-1]['refreshes']}")
         if self.errors:

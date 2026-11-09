@@ -67,6 +67,10 @@ type Options struct {
 	SettleTimeout  time.Duration // longest a request is held: 3s
 
 	CrashDir string // save a replayable bundle for every backend crash here
+
+	// IsolateCompletion runs completion and signature help in a second,
+	// sacrificial backend (sidecar.go).
+	IsolateCompletion bool
 }
 
 // DefaultTimeouts are deliberately generous: the official server parses a
@@ -153,31 +157,32 @@ type serverReq struct {
 
 // Status is the result of the mojols/status request.
 type Status struct {
-	Version          string   `json:"version"`
-	Phase            string   `json:"phase"`
-	BackendGen       int      `json:"backendGeneration"`
-	BackendPID       int      `json:"backendPid,omitempty"`
-	BackendReady     bool     `json:"backendReady"`
-	Degraded         bool     `json:"degraded"`
-	OpenDocuments    int      `json:"openDocuments"`
-	Pending          int      `json:"pendingRequests"`
-	Queued           int      `json:"queuedMessages"`
-	Restarts         int      `json:"restarts"`
-	Timeouts         int      `json:"timeouts"`
-	DroppedMalformed int      `json:"droppedMalformed"`
-	PositionEncoding string   `json:"positionEncoding"`
-	LastBackendError string   `json:"lastBackendError,omitempty"`
-	Quarantined      []string `json:"quarantined,omitempty"`
-	Probing          string   `json:"probing,omitempty"`
-	Suspects         []string `json:"suspects,omitempty"`
-	Refreshes        int      `json:"dependentRefreshes"`
-	ResidentDocs     int      `json:"residentDocuments"`
-	Evictions        int      `json:"evictions"`
-	Recycles         int      `json:"recycles"`
-	BackendRSSMB     int64    `json:"backendRssMB,omitempty"`
-	HeldRequests     int      `json:"heldRequests"` // requests held until their document settled
-	Goroutines       int      `json:"goroutines"`   // mojols itself
-	HeapMB           float64  `json:"heapMB"`       // mojols itself
+	Version          string         `json:"version"`
+	Phase            string         `json:"phase"`
+	BackendGen       int            `json:"backendGeneration"`
+	BackendPID       int            `json:"backendPid,omitempty"`
+	BackendReady     bool           `json:"backendReady"`
+	Degraded         bool           `json:"degraded"`
+	OpenDocuments    int            `json:"openDocuments"`
+	Pending          int            `json:"pendingRequests"`
+	Queued           int            `json:"queuedMessages"`
+	Restarts         int            `json:"restarts"`
+	Timeouts         int            `json:"timeouts"`
+	DroppedMalformed int            `json:"droppedMalformed"`
+	PositionEncoding string         `json:"positionEncoding"`
+	LastBackendError string         `json:"lastBackendError,omitempty"`
+	Quarantined      []string       `json:"quarantined,omitempty"`
+	Probing          string         `json:"probing,omitempty"`
+	Suspects         []string       `json:"suspects,omitempty"`
+	Refreshes        int            `json:"dependentRefreshes"`
+	ResidentDocs     int            `json:"residentDocuments"`
+	Evictions        int            `json:"evictions"`
+	Recycles         int            `json:"recycles"`
+	BackendRSSMB     int64          `json:"backendRssMB,omitempty"`
+	HeldRequests     int            `json:"heldRequests"` // requests held until their document settled
+	Completion       *SidecarStatus `json:"completionBackend,omitempty"`
+	Goroutines       int            `json:"goroutines"` // mojols itself
+	HeapMB           float64        `json:"heapMB"`     // mojols itself
 }
 
 // Server is one editor session.
@@ -248,6 +253,8 @@ type Server struct {
 	held    int
 
 	lastCmd Command // the backend command of the current generation, for crash bundles
+
+	side *sidecar
 }
 
 // New returns a server reading the editor's messages from in and writing to out.
@@ -269,6 +276,7 @@ func New(in io.Reader, out io.Writer, opts Options) *Server {
 		waiting:    map[string][]*pending{},
 		lastUse:    map[string]time.Time{},
 	}
+	s.side = newSidecar(s)
 	s.deps = newDepGraph(func(path string) (string, bool) {
 		for _, d := range s.docs.Snapshot() {
 			if p, ok := uriToPath(d.URI); ok && p == path {
@@ -448,6 +456,11 @@ func (s *Server) handleRequest(m *jsonrpc.Message) {
 	if reply := s.blockedReplyLocked(*m.ID, docURIOf(m.Params)); reply != nil {
 		s.mu.Unlock()
 		s.write(reply)
+		return
+	}
+	if s.opts.IsolateCompletion && isolatedMethods[m.Method] {
+		s.mu.Unlock()
+		go s.side.handle(m)
 		return
 	}
 	if uri := docURIOf(m.Params); uri != "" {
@@ -1126,6 +1139,10 @@ func (s *Server) Status() Status {
 	if s.be != nil && s.be.cmd.Process != nil {
 		st.BackendPID = s.be.cmd.Process.Pid
 	}
+	if s.opts.IsolateCompletion {
+		cs := s.side.status()
+		st.Completion = &cs
+	}
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	st.Goroutines = runtime.NumGoroutine()
@@ -1157,9 +1174,13 @@ func (s *Server) teardown() {
 	be := s.be
 	s.be = nil
 	s.mu.Unlock()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); s.side.stop() }()
 	if be != nil {
 		be.stop(s.opts.ShutdownGrace)
 	}
+	wg.Wait()
 	s.opts.Tracer.Close()
 }
 
