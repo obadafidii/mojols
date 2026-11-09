@@ -12,6 +12,9 @@
 //	MOJOLS_FAKE_HANG_ON=<method>        never answer <method> (until cancelled)
 //	MOJOLS_FAKE_GARBAGE_ON=<method>     answer <method> with an unparseable body
 //	MOJOLS_FAKE_EXIT_ON_START=1         exit(3) before reading anything
+//	MOJOLS_FAKE_DEFS=<name>=<path>:<line>:<char>;...
+//	                                    answer textDocument/definition on an
+//	                                    identifier <name> with that location
 //	MOJOLS_FAKE_CRASH_ON_TEXT=<marker>  segfault-like exit(139) when an opened or changed document contains <marker>
 //	MOJOLS_FAKE_MODIFIED_ONCE_ON=<method> answer the first <method> request with ContentModified
 //	MOJOLS_FAKE_PARSE_MS=<n>            publish diagnostics n ms after an open or change, like a real parse,
@@ -80,8 +83,9 @@ type State struct {
 	ClientResponses []json.RawMessage   `json:"clientResponses"`
 	Cancelled       []string            `json:"cancelled"`
 	Args            []string            `json:"args"`
-	Opens           map[string]int      `json:"opens"`    // didOpen count per URI
-	Overlaps        int                 `json:"overlaps"` // requests on a document still being parsed
+	Opens           map[string]int      `json:"opens"`       // didOpen count per URI
+	Overlaps        int                 `json:"overlaps"`    // requests on a document still being parsed
+	Definitions     int                 `json:"definitions"` // textDocument/definition requests answered
 }
 
 type fake struct {
@@ -173,6 +177,7 @@ type docParams struct {
 		Text       string `json:"text"`
 	} `json:"textDocument"`
 	ContentChanges []text.ContentChange `json:"contentChanges"`
+	Position       text.Position        `json:"position"`
 }
 
 func (f *fake) handle(m *jsonrpc.Message) {
@@ -258,6 +263,28 @@ func (f *fake) handle(m *jsonrpc.Message) {
 			id := c.ID
 			f.w.Write(jsonrpc.NewErrorResponse(&id, jsonrpc.NewError(jsonrpc.CodeRequestCancelled, "cancelled")))
 		}
+	case "textDocument/definition":
+		f.mu.Lock()
+		f.state.Definitions++
+		f.mu.Unlock()
+		d, _ := f.docs.Get(uri)
+		word := wordAt(d.Text, p.Position, f.docs.Encoding())
+		for _, def := range strings.Split(os.Getenv("MOJOLS_FAKE_DEFS"), ";") {
+			name, loc, ok := strings.Cut(def, "=")
+			if !ok || name != word {
+				continue
+			}
+			parts := strings.Split(loc, ":")
+			if len(parts) != 3 {
+				continue
+			}
+			line, _ := strconv.Atoi(parts[1])
+			char, _ := strconv.Atoi(parts[2])
+			pos := map[string]any{"line": line, "character": char}
+			f.reply(m, []any{map[string]any{"uri": "file://" + parts[0], "range": map[string]any{"start": pos, "end": pos}}})
+			return
+		}
+		f.reply(m, []any{})
 	case "textDocument/completion":
 		d, _ := f.docs.Get(uri)
 		f.reply(m, map[string]any{"isIncomplete": false, "items": []any{map[string]any{"label": "fake:" + d.Text}}})
@@ -358,4 +385,20 @@ func (f *fake) crashOnText(uri string) {
 	if d, ok := f.docs.Get(uri); ok && strings.Contains(d.Text, f.opts.CrashOnText) {
 		os.Exit(139)
 	}
+}
+
+// wordAt returns the identifier at p in content.
+func wordAt(content string, p text.Position, enc text.Encoding) string {
+	off := text.Offset(content, p, enc)
+	isWord := func(c byte) bool {
+		return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+	}
+	a, b := off, off
+	for a > 0 && isWord(content[a-1]) {
+		a--
+	}
+	for b < len(content) && isWord(content[b]) {
+		b++
+	}
+	return content[a:b]
 }

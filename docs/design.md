@@ -128,12 +128,16 @@ Completion latency over every request (1-hour soaks, 619-630 completions each, s
 - ContentModified on completion is now retried once in the sidecar; the remaining ones are an empty, incomplete list the editor re-requests on the next keystroke.
 - Even before isolation, completion's median was 304 ms: the official server re-parses at the cursor for every completion. The 250 ms target needs mojols' own completion from its index (M3), not routing.
 
-## M3: mojols' own syntax layer and index (in progress)
+## M3: mojols' own syntax layer and index
 
 `internal/syntax` is a hand-written, error-tolerant Mojo lexer and parser
 in Go (no cgo, no tree-sitter, so mojols stays one static binary).
-`internal/index` resolves every identifier across the workspace. The proxy
-answers definition, references, rename and workspace symbols from it.
+`internal/index` resolves every identifier across the workspace, with a
+type engine that carries generic parameters (`Pointer[Node]` dereferences
+to Node, `Optional[T].value()` to T) through calls, subscripts, loops,
+literals and contextual members. `internal/verify` confirms what remains
+with a separate mojo-lsp-server, started on demand, cached by file content.
+The proxy answers definition, references, rename and workspace symbols.
 
 Validation against the official server (Mojo 1.1.0, all 579 files of the
 1.1 stdlib and its tests):
@@ -143,22 +147,24 @@ Validation against the official server (Mojo 1.1.0, all 579 files of the
 | Parser: panics / illegal tokens | 0 / 0 (fuzzed: 3M lexer, 1.76M parser executions) |
 | Outline vs documentSymbol | 10,506 of 10,507 symbols (the other is a synthesized closure `__call__`) |
 | Parse time, whole corpus (5.9 MB) | ~180 ms on one core |
-| Definition, 158,789 occurrences | precision 98.99%, recall 97.09%, 45 disagreements |
-| References, 6,456 stdlib symbols | 93.9% exactly the server's set; 24 wrong refs, 1,671 missing (3.5%) of 47,076 |
-| References latency via mojols | cold 349 ms (lists and parses the workspace), warm p50 1 ms, p95 2 ms |
+| Definition, static, 158,789 occurrences | precision 98.99%, recall 98.00% |
+| References, static, 6,456 stdlib symbols | 96.8% exactly the compiler's set; 21 wrong, 645 missing of 46,998 |
+| References with verification (397 symbols, weighted to the hardest) | 97.2% exact; 5 missing, 11 wrong |
+| References latency via mojols | warm p50 1 ms, p95 2 ms; first request (lists and parses the workspace) 3-390 ms |
 
 - Ground truth: `scripts/oracle_definitions.py` asks the official server's
-  definition at every occurrence (the stdlib sources resolve across files
-  inside themselves); `scripts/score_resolver.py` and `scripts/refs_gate.py`
-  score against it.
-- Oracle blind spots, not counted as errors: keyword arguments (the server
-  never resolves them), generic trait dispatch (`writer.write` on a
-  `Some[Writer]`), `comptime for` loop variables, implicit conversions
-  (`if x:` resolving to `__bool__`).
-- Upstream quirks found: comptime declaration ranges start at column 0;
-  `out` arguments and captures are reported at their def line; `except X:`
-  binds X; no definition into binary packages (std from user code).
-- Missing references are members reached through generic types
-  (`node[].left` through `Pointer[Node]`, `opt.value()` on `Optional[T]`,
-  `x.cast[...]` on SIMD expressions). Next: type arguments in the resolver,
-  then confirming what remains with the official server in the background.
+  definition at every occurrence; `scripts/score_resolver.py` and
+  `scripts/refs_gate.py` score against it.
+- Counting policy: a reference is spelled like its symbol unless mojols'
+  chain shows an alias. Not counted: the server's blind spots (keyword
+  arguments, generic trait dispatch, `comptime for` variables, implicit
+  `__bool__`/`__init__` calls) and conventions (`Self` as the struct,
+  `out` results and captures reported at their def).
+- Upstream quirks: comptime declaration ranges start at the keyword;
+  `except X:` binds X; no definition into binary packages.
+- Verification: find-references waits up to 1.5 s and finishes in the
+  background; rename waits up to 20 s and refuses if any possible use is
+  unchecked. On the stdlib, 405 file versions, 4,413 queries, no failures.
+- Left: `__next__` through a generic iterator resolves to the trait's
+  method (the server picks the concrete one); a few implicit-conversion
+  artifacts.

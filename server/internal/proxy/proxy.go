@@ -30,6 +30,7 @@ import (
 	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
 	"github.com/tdadadavid/mojols/server/internal/text"
 	"github.com/tdadadavid/mojols/server/internal/trace"
+	"github.com/tdadadavid/mojols/server/internal/verify"
 )
 
 // Options configures a Server. Zero values take the defaults below.
@@ -72,6 +73,12 @@ type Options struct {
 	// NoIndex turns off mojols' own index: definition, references, rename
 	// and workspace symbols then come from mojo-lsp-server alone.
 	NoIndex bool
+	// NoVerify turns off confirming, with a separate mojo-lsp-server,
+	// references the index cannot resolve statically.
+	NoVerify bool
+	// ReferencesWait bounds how long find-references waits for that
+	// confirmation (1.5 s); RenameWait, how long rename waits (20 s).
+	ReferencesWait, RenameWait time.Duration
 	// IsolateCompletion runs completion and signature help in a second,
 	// sacrificial backend (sidecar.go).
 	IsolateCompletion bool
@@ -91,6 +98,12 @@ var DefaultTimeouts = map[string]time.Duration{
 func (o *Options) setDefaults() {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	if o.ReferencesWait == 0 {
+		o.ReferencesWait = 1500 * time.Millisecond
+	}
+	if o.RenameWait == 0 {
+		o.RenameWait = 20 * time.Second
 	}
 	if o.Timeouts == nil {
 		o.Timeouts = DefaultTimeouts
@@ -185,6 +198,7 @@ type Status struct {
 	BackendRSSMB     int64          `json:"backendRssMB,omitempty"`
 	HeldRequests     int            `json:"heldRequests"` // requests held until their document settled
 	Completion       *SidecarStatus `json:"completionBackend,omitempty"`
+	Verifier         *verify.Stats  `json:"verifier,omitempty"`
 	Goroutines       int            `json:"goroutines"` // mojols itself
 	HeapMB           float64        `json:"heapMB"`     // mojols itself
 }
@@ -261,6 +275,9 @@ type Server struct {
 	side *sidecar
 	// ix is mojols' own workspace index (nil with Options.NoIndex).
 	ix *index.Index
+	// verifier confirms references mojols cannot resolve statically
+	// (nil with Options.NoVerify or NoIndex).
+	verifier *verify.Verifier
 }
 
 // New returns a server reading the editor's messages from in and writing to out.
@@ -285,6 +302,9 @@ func New(in io.Reader, out io.Writer, opts Options) *Server {
 	s.side = newSidecar(s)
 	if !opts.NoIndex {
 		s.ix = index.New(nil)
+		if !opts.NoVerify {
+			s.verifier = verify.New(verify.Options{Logger: opts.Logger, Command: s.verifierCommand})
+		}
 	}
 	s.deps = newDepGraph(func(path string) (string, bool) {
 		for _, d := range s.docs.Snapshot() {
@@ -1184,6 +1204,10 @@ func (s *Server) Status() Status {
 		cs := s.side.status()
 		st.Completion = &cs
 	}
+	if s.verifier != nil {
+		vs := s.verifier.Stats()
+		st.Verifier = &vs
+	}
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	st.Goroutines = runtime.NumGoroutine()
@@ -1206,6 +1230,9 @@ func (s *Server) teardown() {
 	s.exited = true
 	if s.restartTimer != nil {
 		s.restartTimer.Stop()
+	}
+	if s.verifier != nil {
+		go s.verifier.Close()
 	}
 	for _, p := range s.pending {
 		if p.timer != nil {

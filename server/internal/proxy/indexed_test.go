@@ -96,7 +96,7 @@ func TestIndexReferencesAcrossFiles(t *testing.T) {
 	var locs []lspLoc
 	h.callOK("textDocument/references", map[string]any{
 		"textDocument": map[string]any{"uri": mainURI}, "position": pos(4, 11), // area( in print(area(c)...)
-		"context":      map[string]any{"includeDeclaration": true},
+		"context": map[string]any{"includeDeclaration": true},
 	}, &locs)
 	got := strings.Join(locStrings(dir, locs), " ")
 	want := "app/main.mojo:1:17 app/main.mojo:5:11 pkg/geo/__init__.mojo:1:21 pkg/geo/shapes.mojo:4:5"
@@ -107,7 +107,7 @@ func TestIndexReferencesAcrossFiles(t *testing.T) {
 	// Without the declaration.
 	h.callOK("textDocument/references", map[string]any{
 		"textDocument": map[string]any{"uri": mainURI}, "position": pos(4, 11),
-		"context":      map[string]any{"includeDeclaration": false},
+		"context": map[string]any{"includeDeclaration": false},
 	}, &locs)
 	if got := strings.Join(locStrings(dir, locs), " "); strings.Contains(got, "shapes.mojo:4:5") || !strings.Contains(got, "__init__.mojo") {
 		t.Errorf("without declaration: %s", got)
@@ -117,7 +117,7 @@ func TestIndexReferencesAcrossFiles(t *testing.T) {
 	h.replaceText(mainURI, 2, string(src)+"    area(c)\n")
 	h.callOK("textDocument/references", map[string]any{
 		"textDocument": map[string]any{"uri": mainURI}, "position": pos(4, 11),
-		"context":      map[string]any{"includeDeclaration": true},
+		"context": map[string]any{"includeDeclaration": true},
 	}, &locs)
 	if got := strings.Join(locStrings(dir, locs), " "); !strings.Contains(got, "app/main.mojo:6:5") {
 		t.Errorf("unsaved use missing: %s", got)
@@ -136,10 +136,10 @@ func TestIndexDefinition(t *testing.T) {
 	if got := strings.Join(locStrings(dir, locs), " "); got != "pkg/geo/shapes.mojo:2:9" {
 		t.Errorf("definition of c.r: %s", got)
 	}
-	// An unresolvable name goes to the backend (the fake answers "method
-	// not found", which proves the request reached it).
+	// An unresolvable name goes to the backend.
+	before := h.fakeState().Definitions
 	m := h.call("textDocument/definition", map[string]any{"textDocument": map[string]any{"uri": mainURI}, "position": pos(4, 4)}) // print
-	if m.Error == nil || !strings.Contains(m.Error.Message, "fakelsp") {
+	if m.Error != nil || h.fakeState().Definitions != before+1 {
 		t.Errorf("fallback definition did not reach the backend: %v %s", m.Error, m.Result)
 	}
 }
@@ -233,9 +233,60 @@ func TestIndexWorksWithoutBackend(t *testing.T) {
 	var locs []lspLoc
 	h.callOK("textDocument/references", map[string]any{
 		"textDocument": map[string]any{"uri": mainURI}, "position": pos(4, 11),
-		"context":      map[string]any{"includeDeclaration": true},
+		"context": map[string]any{"includeDeclaration": true},
 	}, &locs)
 	if len(locs) != 4 {
 		t.Errorf("references with the backend down: %d", len(locs))
+	}
+}
+
+func TestIndexReferencesConfirmedByServer(t *testing.T) {
+	dir := indexedWorkspace(t)
+	shapes := filepath.Join(dir, "pkg/geo/shapes.mojo")
+	// The fake server knows `r` is the field declared at shapes.mojo:2:9.
+	h := newIndexedHarness(t, dir, []string{"MOJOLS_FAKE_DEFS=r=" + shapes + ":1:8"}, false)
+	mainURI := pathToURI(filepath.Join(dir, "app/main.mojo"))
+	src, _ := os.ReadFile(filepath.Join(dir, "app/main.mojo"))
+	// mystery() is unknown to mojols, so `.r` on its result is unresolved.
+	h.openURI(mainURI, string(src)+"    print(mystery().r)\n")
+	var locs []lspLoc
+	h.callOK("textDocument/references", map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(shapes)}, "position": pos(1, 8),
+		"context": map[string]any{"includeDeclaration": true},
+	}, &locs)
+	got := strings.Join(locStrings(dir, locs), " ")
+	if got != "app/main.mojo:5:22 app/main.mojo:6:21 pkg/geo/shapes.mojo:2:9 pkg/geo/shapes.mojo:5:14 pkg/geo/shapes.mojo:5:20" {
+		t.Errorf("references to r: %s", got)
+	}
+	var st Status
+	h.callOK("mojols/status", nil, &st)
+	if st.Verifier == nil || st.Verifier.Files != 1 {
+		t.Errorf("verifier status: %+v", st.Verifier)
+	}
+
+	// Rename covers the confirmed use too.
+	var edit workspaceEdit
+	h.callOK("textDocument/rename", map[string]any{"textDocument": map[string]any{"uri": pathToURI(shapes)}, "position": pos(1, 8), "newName": "radius"}, &edit)
+	n := 0
+	for _, e := range edit.Changes {
+		n += len(e)
+	}
+	if n != 5 { // shapes: the field and c.r * c.r; main: c.r and mystery().r
+		t.Errorf("rename edits: %d (%+v)", n, edit.Changes)
+	}
+}
+
+func TestIndexRenameRefusesUncheckedUses(t *testing.T) {
+	dir := indexedWorkspace(t)
+	shapes := filepath.Join(dir, "pkg/geo/shapes.mojo")
+	// The server crashes on every definition request: unknown uses stay
+	// unknown, and renaming would risk missing them.
+	h := newIndexedHarness(t, dir, []string{"MOJOLS_FAKE_CRASH_ON=textDocument/definition"}, false)
+	mainURI := pathToURI(filepath.Join(dir, "app/main.mojo"))
+	src, _ := os.ReadFile(filepath.Join(dir, "app/main.mojo"))
+	h.openURI(mainURI, string(src)+"    print(mystery().r)\n")
+	m := h.call("textDocument/rename", map[string]any{"textDocument": map[string]any{"uri": pathToURI(shapes)}, "position": pos(1, 8), "newName": "radius"})
+	if m.Error == nil || !strings.Contains(m.Error.Message, "could not be checked") {
+		t.Errorf("rename with unchecked uses: %v %s", m.Error, m.Result)
 	}
 }

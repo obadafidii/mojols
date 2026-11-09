@@ -58,6 +58,8 @@ type Decl struct {
 	// block: after the whole statement for `var x = x + 1`, so the right
 	// side still means the outer x; the body for a loop variable.
 	Visible int
+	// Loop marks a loop variable; Value is then what it iterates over.
+	Loop bool
 	// Implicit marks a local created by plain assignment (`x = 1` in a def).
 	Implicit bool
 	// Import is set for KImport: the statement that bound the name.
@@ -159,6 +161,17 @@ type Context struct {
 	Pos    int    // positional index among the arguments
 	Name   string // the keyword, for `name=.member`
 	Expect Span   // an expected type's source, when known directly
+	// Peer, when HasPeer, is the index of the operand compared against
+	// (`dtype == .float32`: dtype).
+	Peer    int
+	HasPeer bool
+	// Return marks `return .member`: the type is the def's return type.
+	Return bool
+	// For a member of a literal or a parenthesized expression rather than
+	// a name: Lit is 's' (string), 't' (t-string), 'i' (integer), 'f'
+	// (float) or 'b' (True/False); Inner is the expression inside `( )`.
+	Lit   byte
+	Inner Span
 }
 
 // Import is one import statement.

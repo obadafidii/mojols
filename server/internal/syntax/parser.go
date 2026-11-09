@@ -665,6 +665,11 @@ func (p *parser) varDecl(l *line, scope *Scope, owner *Decl) {
 	if eq >= 0 {
 		val = spanOf(rest[eq+1:])
 		p.scan(rest[eq+1:], scope)
+		if v := rest[eq+1:]; len(v) >= 2 && p.isOp(v, 0, ".") && v[1].Kind == Ident && typ.End > typ.Start {
+			if k := p.lastIdentRef(v[1]); k >= 0 {
+				p.setCtx(k, Context{Callee: -1, Expect: typ})
+			}
+		}
 	}
 	decorators := p.takeDecorators()
 	for _, tok := range rest[:namesEnd] {
@@ -820,6 +825,7 @@ func (p *parser) forStmt(l *line, scope *Scope, owner *Decl) {
 				d.Span = spanOf(targets)
 				d.Value = spanOf(t[in+1 : iterEnd])
 				d.Visible = t[max(iterEnd-1, 0)].End
+				d.Loop = true
 			}
 		}
 	})
@@ -1009,6 +1015,8 @@ type openBracket struct {
 	callee int    // ref index of the identifier just before it, or -1
 	pos    int    // index of the current argument (commas seen)
 	kw     string // keyword of the current argument, if `name=`
+	start  int    // offset just after the opening bracket
+	inner  Span   // set when closed: what was inside
 }
 
 // scanSkipping records every identifier in toks. Words in skip are treated
@@ -1036,12 +1044,13 @@ func (p *parser) scanSkipping(toks []Token, scope *Scope, skip map[string]bool) 
 					// A postfix chain: `f[T](x)` calls what `f[T]` names.
 					callee = lastClosed.callee
 				}
-				stack = append(stack, openBracket{op: s, callee: callee})
+				stack = append(stack, openBracket{op: s, callee: callee, start: tok.End})
 				lastRef = -1
 				continue
 			}
 			if isClose(s) && len(stack) > 0 {
 				lastClosed = stack[len(stack)-1]
+				lastClosed.inner = Span{lastClosed.start, tok.Start}
 				stack = stack[:len(stack)-1]
 			}
 			if s == "," && len(stack) > 0 {
@@ -1095,7 +1104,46 @@ func (p *parser) scanSkipping(toks []Token, scope *Scope, skip map[string]bool) 
 				case i > 1 && toks[i-2].Kind == Op && (p.text(toks[i-2]) == ")" || p.text(toks[i-2]) == "]"):
 					if lastClosed.callee >= 0 {
 						r.Call, r.Post = lastClosed.callee, lastClosed.op[0]
+					} else if lastClosed.op == "(" {
+						// `(a + b).c`: a member of the parenthesized value.
+						p.f.Refs = append(p.f.Refs, r)
+						p.setCtx(len(p.f.Refs)-1, Context{Callee: -1, Inner: lastClosed.inner})
+						lastRef = len(p.f.Refs) - 1
+						continue
 					}
+				case i > 1 && (toks[i-2].Kind == String || toks[i-2].Kind == Number || toks[i-2].Kind == Ident && (p.text(toks[i-2]) == "True" || p.text(toks[i-2]) == "False")):
+					// A member of a literal: `"abc".byte_length()`.
+					lit := byte('b')
+					switch toks[i-2].Kind {
+					case String:
+						lit = 's'
+						if c := p.src[toks[i-2].Start]; c == 't' || c == 'T' || c == 'f' || c == 'F' {
+							lit = 't'
+						}
+					case Number:
+						lit = 'i'
+						if strings.ContainsAny(p.text(toks[i-2]), ".eE") && !strings.HasPrefix(p.text(toks[i-2]), "0x") {
+							lit = 'f'
+						}
+					}
+					p.f.Refs = append(p.f.Refs, r)
+					p.setCtx(len(p.f.Refs)-1, Context{Callee: -1, Lit: lit})
+					lastRef = len(p.f.Refs) - 1
+					continue
+				case i > 2 && toks[i-2].Kind == Op && (p.text(toks[i-2]) == "==" || p.text(toks[i-2]) == "!=") && toks[i-3].Kind == Ident:
+					// `dtype == .float32`: the type of the other side.
+					peer := p.lastIdentRef(toks[i-3])
+					p.f.Refs = append(p.f.Refs, r)
+					if peer >= 0 {
+						p.setCtx(len(p.f.Refs)-1, Context{Callee: -1, Peer: peer, HasPeer: true})
+					}
+					lastRef = len(p.f.Refs) - 1
+					continue
+				case i == 1 && p.isWord(toks, 0, "return") || i > 1 && p.isWord(toks, i-2, "return"):
+					p.f.Refs = append(p.f.Refs, r)
+					p.setCtx(len(p.f.Refs)-1, Context{Callee: -1, Return: true})
+					lastRef = len(p.f.Refs) - 1
+					continue
 				case len(stack) > 0 && (i == 1 || toks[i-2].Kind == Op && (p.text(toks[i-2]) == "(" || p.text(toks[i-2]) == "[" || p.text(toks[i-2]) == "," || p.text(toks[i-2]) == "=")):
 					// A contextual member: its type comes from the
 					// parameter or argument it is passed as.
@@ -1310,6 +1358,13 @@ func (p *parser) finish() {
 				c.Callee = newIndex[c.Callee]
 			} else {
 				c.Callee = -1
+			}
+			if c.HasPeer {
+				if c.Peer >= 0 && c.Peer < len(newIndex) {
+					c.Peer = newIndex[c.Peer]
+				} else {
+					c.HasPeer = false
+				}
 			}
 			ctx[newIndex[old]] = c
 		}

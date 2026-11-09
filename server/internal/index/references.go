@@ -130,8 +130,20 @@ func (sym Symbol) same(t Target) bool {
 // References finds every occurrence of sym across the workspace and open
 // documents, in file and position order.
 func (ix *Index) References(sym Symbol) []Occurrence {
+	occs, _ := ix.ReferencesAndUnknown(sym)
+	return occs
+}
+
+// ReferencesAndUnknown is References, plus the occurrences of sym's name
+// that mojols cannot resolve statically but that could be sym: members of
+// expressions whose type it cannot infer, when sym is a member of a
+// struct or trait. The official server can settle those (internal/verify).
+func (ix *Index) ReferencesAndUnknown(sym Symbol) ([]Occurrence, []Occurrence) {
 	ix.lock()
 	defer ix.mu.Unlock()
+	var unknown []Occurrence
+	isMember := sym.Decl.Parent != nil && (sym.Decl.Parent.Kind == syntax.KStruct || sym.Decl.Parent.Kind == syntax.KTrait) &&
+		sym.Decl.Scope == sym.Decl.Parent.Body
 	files := ix.workspaceFiles()
 	type key struct {
 		f    *File
@@ -167,6 +179,10 @@ func (ix *Index) References(sym Symbol) []Occurrence {
 				continue
 			}
 			chain := ix.resolveRef(k.f, i, 0)
+			if len(chain) == 0 && isMember && k.name == sym.Decl.Name && k.f.Syn.Refs[i].Kind == syntax.RMember {
+				unknown = append(unknown, Occurrence{File: k.f, Span: k.f.Syn.Refs[i].Span})
+				continue
+			}
 			hit, viaAlias := false, false
 			for n, t := range chain {
 				if sym.same(t) {
@@ -203,13 +219,18 @@ func (ix *Index) References(sym Symbol) []Occurrence {
 			}
 		}
 	}
+	sortOccurrences(out)
+	sortOccurrences(unknown)
+	return out, unknown
+}
+
+func sortOccurrences(out []Occurrence) {
 	sort.Slice(out, func(a, b int) bool {
 		if out[a].File.Path != out[b].File.Path {
 			return out[a].File.Path < out[b].File.Path
 		}
 		return out[a].Span.Start < out[b].Span.Start
 	})
-	return out
 }
 
 // InWorkspace reports whether path is under one of the workspace

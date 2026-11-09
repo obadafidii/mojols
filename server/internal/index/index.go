@@ -29,6 +29,8 @@ type Index struct {
 	gen      uint64            // bumped on every change; memos are per generation
 	readFile func(string) ([]byte, error)
 
+	budget int // steps left for the current resolution (see stepBudget)
+
 	workspace []string // directories a references search covers
 	paths     []string // .mojo files found under them
 	scanned   bool     // paths is current
@@ -57,6 +59,7 @@ type File struct {
 	gen      uint64
 	refMemo  map[int][]Target
 	nameMemo map[string][]Target
+	typeMemo map[int]typeResult
 }
 
 // Target is what a name resolves to: a declaration, or a whole module
@@ -199,6 +202,7 @@ func (ix *Index) memo(f *File) {
 		f.gen = ix.gen
 		f.refMemo = map[int][]Target{}
 		f.nameMemo = map[string][]Target{}
+		f.typeMemo = map[int]typeResult{}
 	}
 }
 

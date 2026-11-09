@@ -234,6 +234,18 @@ func TestEditsInvalidate(t *testing.T) {
 	}
 }
 
+func TestSelfImportOfSubmodule(t *testing.T) {
+	ix, dir := workspace(t, map[string]string{
+		"pkg/os/__init__.mojo":      "from . import path\n",
+		"pkg/os/path/__init__.mojo": "from .impl import exists\n",
+		"pkg/os/path/impl.mojo":     "def exists(p: String) -> Bool:\n    return True\n",
+		"app/m.mojo":                "import os\nos.path.exists(\"x\")\n",
+	})
+	if got := resolveAt(t, ix, dir, "app/m.mojo", "exists", 0); got != "pkg/os/path/impl.mojo:1 def exists" {
+		t.Errorf("os.path.exists: %s", got)
+	}
+}
+
 func TestCyclesTerminate(t *testing.T) {
 	ix, dir := workspace(t, map[string]string{
 		"pkg/a/__init__.mojo": "from .b import X\nfrom .b import *\ncomptime Y = Y\n",

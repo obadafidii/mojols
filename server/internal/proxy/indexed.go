@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -8,12 +9,14 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tdadadavid/mojols/server/internal/index"
 	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
 	"github.com/tdadadavid/mojols/server/internal/syntax"
 	"github.com/tdadadavid/mojols/server/internal/text"
+	"github.com/tdadadavid/mojols/server/internal/verify"
 )
 
 // indexMethods are answered from mojols' own workspace index. They work
@@ -128,7 +131,8 @@ func (s *Server) handleIndexed(m *jsonrpc.Message) bool {
 			return false // e.g. a member of an expression mojols cannot type
 		}
 		var out []location
-		for _, o := range s.ix.References(sym) {
+		occs, _ := s.referencesConfirmed(sym, s.opts.ReferencesWait)
+		for _, o := range occs {
 			if !p.Context.IncludeDeclaration && o.Decl && isOwnDecl(sym, o) {
 				continue
 			}
@@ -161,6 +165,119 @@ func (s *Server) handleIndexed(m *jsonrpc.Message) bool {
 		return true
 	}
 	return false
+}
+
+// verifierCommand is the command the verifier starts: the backend's.
+func (s *Server) verifierCommand() (verify.Command, error) {
+	s.mu.Lock()
+	c := s.lastCmd
+	roots := s.roots
+	s.mu.Unlock()
+	if c.Path == "" {
+		var err error
+		if c, err = s.opts.Resolve(roots); err != nil {
+			return verify.Command{}, err
+		}
+	}
+	return verify.Command{Path: c.Path, Args: c.Args, Env: c.Env, Dir: c.Dir}, nil
+}
+
+// referencesConfirmed is the index's references to sym plus the
+// occurrences it could not resolve that the verifier confirms are sym,
+// waiting up to wait for unchecked files. unchecked counts candidates
+// still unknown after that.
+func (s *Server) referencesConfirmed(sym index.Symbol, wait time.Duration) ([]index.Occurrence, int) {
+	occs, unknown := s.ix.ReferencesAndUnknown(sym)
+	if len(unknown) == 0 || s.verifier == nil {
+		return occs, len(unknown)
+	}
+	byFile := map[*index.File][]int{}
+	for _, u := range unknown {
+		byFile[u.File] = append(byFile[u.File], u.Span.Start)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	var wg sync.WaitGroup
+	for f, offsets := range byFile {
+		wg.Add(1)
+		go func(f *index.File, offsets []int) {
+			defer wg.Done()
+			s.verifier.Check(ctx, f.Path, f.Syn.Src, offsets)
+		}(f, offsets)
+	}
+	wg.Wait()
+
+	targets := s.symbolPositions(sym, occs)
+	unchecked := 0
+	for f, offsets := range byFile {
+		answers, _, failed := s.verifier.Lookup(f.Path, f.Syn.Src, offsets)
+		for _, off := range offsets {
+			r, ok := answers[off]
+			if !ok {
+				// Not checked yet, or the server failed on this file:
+				// either way, unknown.
+				unchecked++
+				_ = failed
+				continue
+			}
+			if r.Loc != nil && targets.match(r.Loc) {
+				i := s.ix.OccurrenceAt(f, off)
+				if i >= 0 {
+					occs = append(occs, index.Occurrence{File: f, Span: f.Syn.Refs[i].Span})
+				}
+			}
+		}
+	}
+	sort.SliceStable(occs, func(a, b int) bool {
+		if occs[a].File.Path != occs[b].File.Path {
+			return occs[a].File.Path < occs[b].File.Path
+		}
+		return occs[a].Span.Start < occs[b].Span.Start
+	})
+	return occs, unchecked
+}
+
+// symbolTargets are the places the server may report for a symbol: its
+// declaration and its overloads' (also by line alone, since the server
+// reports comptime declarations from column 0), and the imports and
+// re-exports that bind it.
+type symbolTargets struct {
+	path  map[string]map[text.Position]bool
+	lines map[string]map[uint32]bool
+}
+
+func (t symbolTargets) match(l *verify.Loc) bool {
+	if t.path[l.Path][l.Range.Start] {
+		return true
+	}
+	return l.Range.Start.Line == l.Range.End.Line && t.lines[l.Path][l.Range.Start.Line]
+}
+
+func (s *Server) symbolPositions(sym index.Symbol, occs []index.Occurrence) symbolTargets {
+	t := symbolTargets{path: map[string]map[text.Position]bool{}, lines: map[string]map[uint32]bool{}}
+	add := func(f *index.File, off int, byLine bool) {
+		p := f.Lines.Position(off, text.UTF16)
+		if t.path[f.Path] == nil {
+			t.path[f.Path] = map[text.Position]bool{}
+			t.lines[f.Path] = map[uint32]bool{}
+		}
+		t.path[f.Path][p] = true
+		if byLine {
+			t.lines[f.Path][p.Line] = true
+		}
+	}
+	add(sym.File, sym.Decl.NameSpan.Start, true)
+	if sym.Decl.Scope != nil {
+		for _, d := range sym.Decl.Scope.Names[sym.Decl.Name] {
+			add(sym.File, d.NameSpan.Start, true)
+		}
+	}
+	for _, o := range occs {
+		if o.Decl {
+			add(o.File, o.Span.Start, false)
+		}
+	}
+	return t
 }
 
 // isOwnDecl reports whether o is the declaration of sym itself (or of one
@@ -236,7 +353,10 @@ func (s *Server) rename(f *index.File, offset int, newName string) (any, string)
 	if newName == sym.Decl.Name {
 		return map[string]any{"changes": map[string][]textEdit{}}, ""
 	}
-	occs := s.ix.References(sym)
+	occs, unchecked := s.referencesConfirmed(sym, s.opts.RenameWait)
+	if unchecked > 0 {
+		return nil, fmt.Sprintf("mojols: %d possible uses of `%s` could not be checked yet (mojo-lsp-server is still reading their files or failed on them); renaming now could miss some, so try again in a moment", unchecked, sym.Decl.Name)
+	}
 	if conflict := s.renameConflict(sym, occs, newName); conflict != "" {
 		return nil, conflict
 	}

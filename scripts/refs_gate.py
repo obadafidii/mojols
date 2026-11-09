@@ -73,12 +73,14 @@ def accuracy(args, oracle):
     names = {}
     for f, line, char, name in decls:
         names[sym_of.get((f, line, char), (f, line, char))] = name
+    occ_name = {}
     ours_refs = collections.defaultdict(set)
     oracle_refs = collections.defaultdict(set)
     oracle_at = {}
     for f in files:
         for line, char, name, kind, loc in oracle[f]:
             occ = (f, line, char)
+            occ_name[occ] = name
             r = ours[f].get((line, char))
             chain = [tuple(c) for c in (r["chain"] if r and r["chain"] else [])]
             if chain and chain[-1][1] >= 0:
@@ -110,7 +112,11 @@ def accuracy(args, oracle):
     worst = []
     for f, line, char, name in decls:
         key = sym_of.get((f, line, char), (f, line, char))
-        mine, theirs = ours_refs.get(key, set()), oracle_refs.get(key, set())
+        mine = ours_refs.get(key, set())
+        # A reference is spelled like what it names, unless mojols' own
+        # chain shows an alias. The server also counts `Self` inside a
+        # struct, and reports `out` results and captures at their def.
+        theirs = {o for o in oracle_refs.get(key, set()) if occ_name.get(o) == name or o in mine}
         missing = theirs - mine
         wrong = {o for o in mine - theirs if oracle_at.get(o) is not None}
         unverified = {o for o in mine - theirs if oracle_at.get(o) is None}
@@ -125,6 +131,7 @@ def accuracy(args, oracle):
         else:
             worst.append((len(missing) + len(wrong), name, f, line, len(missing), len(wrong), sorted(missing)[:3], sorted(wrong)[:3]))
     worst.sort(reverse=True)
+    accuracy.result = (sym_of, oracle_refs, oracle_at, [w[1:4] for w in worst], occ_name)
     print(f"accuracy over {stats['symbols']} stdlib symbols:")
     print(f"  symbols with exactly the server's references: {stats['exact']} ({100*stats['exact']/max(stats['symbols'],1):.2f}%)")
     print(f"  references: server {stats['refs_oracle']}, mojols {stats['refs_ours']}; "
@@ -138,6 +145,13 @@ def accuracy(args, oracle):
 def latency(args, decls):
     rng = random.Random(7)
     sample = rng.sample(decls, min(args.sample, len(decls)))
+    sym_of, oracle_refs, oracle_at, worst, occ_name = getattr(accuracy, "result", ({}, {}, {}, [], {}))
+    # Also the symbols the index alone gets wrong or incomplete.
+    by_loc = {(f, l): (f, l, c, n) for f, l, c, n in decls}
+    for name, f, line in worst[: args.sample // 3]:
+        d = by_loc.get((f, line))
+        if d and d not in sample:
+            sample.append(d)
     argv = [args.mojols, "--backend", args.server, "--log-file", "/dev/null"]
     for d in args.include:
         argv += ["-I", d]
@@ -145,18 +159,48 @@ def latency(args, decls):
     root = "file://" + quote(str(Path(args.workspace).resolve()))
     c.call("initialize", {"processId": os.getpid(), "rootUri": root, "capabilities": {}})
     c.notify("initialized", {})
-    times, counts = [], []
-    for i, (f, line, char, name) in enumerate(sample):
-        t0 = time.monotonic()
-        resp, _ = c.call("textDocument/references", {"textDocument": {"uri": "file://" + quote(f)},
-                                                     "position": {"line": line, "character": char},
-                                                     "context": {"includeDeclaration": True}}, timeout=120)
-        dt = time.monotonic() - t0
-        if resp.get("error"):
-            print(f"  error for {name}: {resp['error']}")
-            continue
-        times.append(dt)
-        counts.append(len(resp.get("result") or []))
+    def one_pass(label):
+        times, counts, exact, missing, wrong = [], [], 0, 0, 0
+        examples = []
+        for i, (f, line, char, name) in enumerate(sample):
+            t0 = time.monotonic()
+            resp, _ = c.call("textDocument/references", {"textDocument": {"uri": "file://" + quote(f)},
+                                                         "position": {"line": line, "character": char},
+                                                         "context": {"includeDeclaration": True}}, timeout=120)
+            dt = time.monotonic() - t0
+            if resp.get("error"):
+                print(f"  error for {name}: {resp['error']}")
+                continue
+            times.append(dt)
+            res = resp.get("result") or []
+            counts.append(len(res))
+            ours = {(unquote(r["uri"][7:]), r["range"]["start"]["line"], r["range"]["start"]["character"]) for r in res}
+            key = sym_of.get((f, line, char), (f, line, char))
+            theirs = {o for o in oracle_refs.get(key, set()) if occ_name.get(o) == name or o in ours}
+            m = theirs - ours
+            w = {o for o in ours - theirs if oracle_at.get(o) is not None and o in oracle_at}
+            missing += len(m)
+            wrong += len(w)
+            for o in sorted(m)[:3]:
+                examples.append(f"missing {name}: {o[0].split('/stdlib/')[-1]}:{o[1]+1}:{o[2]+1}")
+            for o in sorted(w)[:3]:
+                examples.append(f"wrong {name}: {o[0].split('/stdlib/')[-1]}:{o[1]+1}:{o[2]+1}")
+            exact += not m and not w
+        print(f"{label}: {exact}/{len(times)} symbols exact, missing {missing}, wrong {wrong}")
+        for e in examples[: args.examples]:
+            print("   ", e)
+        return times, counts
+
+    one_pass("first pass (verification starting)")
+    deadline = time.monotonic() + 1800
+    while time.monotonic() < deadline:
+        st, _ = c.call("mojols/status", None)
+        v = (st.get("result") or {}).get("verifier") or {}
+        if not v.get("queued") and not v.get("running"):
+            break
+        time.sleep(2)
+    print(f"verifier: {v}")
+    times, counts = one_pass("second pass (verified)")
     c.proc.kill()
     cold, warm = times[0], sorted(times[1:])
     pct = lambda p: warm[min(len(warm) - 1, int(p * len(warm)))] * 1000
