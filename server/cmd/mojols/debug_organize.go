@@ -5,9 +5,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/tdadadavid/mojols/server/internal/index"
-	"github.com/tdadadavid/mojols/server/internal/organize"
-	"github.com/tdadadavid/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/index"
+	"github.com/obadafidii/mojols/server/internal/organize"
+	"github.com/obadafidii/mojols/server/internal/syntax"
 )
 
 // debugOrganize prints each file organized (to stdout with -w=false, or

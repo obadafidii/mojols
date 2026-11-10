@@ -3,9 +3,9 @@ package proxy
 import (
 	"encoding/json"
 
-	"github.com/tdadadavid/mojols/server/internal/index"
-	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
-	"github.com/tdadadavid/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/index"
+	"github.com/obadafidii/mojols/server/internal/jsonrpc"
+	"github.com/obadafidii/mojols/server/internal/syntax"
 )
 
 // fallbackResult answers a request mojo-lsp-server cannot serve right now

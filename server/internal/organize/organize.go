@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/tdadadavid/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/syntax"
 )
 
 // LineLength is where statements are wrapped, as `mojo format` does.

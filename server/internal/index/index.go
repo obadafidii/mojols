@@ -14,8 +14,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/tdadadavid/mojols/server/internal/syntax"
-	"github.com/tdadadavid/mojols/server/internal/text"
+	"github.com/obadafidii/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/text"
 )
 
 // Index holds parsed files and resolves names across them. It is safe for

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
+	"github.com/obadafidii/mojols/server/internal/jsonrpc"
 )
 
 func (h *harness) complete(uri string, line, char int) *jsonrpc.Message {

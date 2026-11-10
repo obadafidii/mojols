@@ -7,9 +7,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/tdadadavid/mojols/server/internal/index"
-	"github.com/tdadadavid/mojols/server/internal/syntax"
-	"github.com/tdadadavid/mojols/server/internal/text"
+	"github.com/obadafidii/mojols/server/internal/index"
+	"github.com/obadafidii/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/text"
 )
 
 // debugResolve prints, for every identifier occurrence in each file, the

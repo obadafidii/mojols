@@ -3,7 +3,7 @@ package proxy
 import (
 	"fmt"
 
-	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
+	"github.com/obadafidii/mojols/server/internal/jsonrpc"
 	"path/filepath"
 	"testing"
 	"time"

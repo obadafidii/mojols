@@ -24,8 +24,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
-	"github.com/tdadadavid/mojols/server/internal/text"
+	"github.com/obadafidii/mojols/server/internal/jsonrpc"
+	"github.com/obadafidii/mojols/server/internal/text"
 )
 
 // docHealth tracks one document's latest text in the current backend.

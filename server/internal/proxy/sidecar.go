@@ -25,8 +25,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
-	"github.com/tdadadavid/mojols/server/internal/text"
+	"github.com/obadafidii/mojols/server/internal/jsonrpc"
+	"github.com/obadafidii/mojols/server/internal/text"
 )
 
 // isolatedMethods go to the completion backend.

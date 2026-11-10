@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/tdadadavid/mojols/server/internal/syntax"
-	"github.com/tdadadavid/mojols/server/internal/text"
+	"github.com/obadafidii/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/text"
 )
 
 // debugParse prints mojols' own reading of each file as one JSON object per

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/tdadadavid/mojols/server/internal/stdlib"
+	"github.com/obadafidii/mojols/server/internal/stdlib"
 )
 
 // setupStdlib gives the index the stdlib's sources, once per session, in

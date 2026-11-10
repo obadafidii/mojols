@@ -3,7 +3,7 @@ package index
 import (
 	"sort"
 
-	"github.com/tdadadavid/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/syntax"
 )
 
 // IsCall reports whether the occurrence at sp in f is called: followed by

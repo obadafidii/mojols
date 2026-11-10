@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tdadadavid/mojols/server/internal/fakelsp"
-	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
+	"github.com/obadafidii/mojols/server/internal/fakelsp"
+	"github.com/obadafidii/mojols/server/internal/jsonrpc"
 )
 
 // The test binary doubles as the fake backend: mojols re-executes it with

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
-	"github.com/tdadadavid/mojols/server/internal/organize"
+	"github.com/obadafidii/mojols/server/internal/jsonrpc"
+	"github.com/obadafidii/mojols/server/internal/organize"
 )
 
 const organizeKind = "source.organizeImports"

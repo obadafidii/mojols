@@ -3,7 +3,7 @@ package index
 import (
 	"strings"
 
-	"github.com/tdadadavid/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/syntax"
 )
 
 // HoverAt describes the declaration named at offset in f, from source: its

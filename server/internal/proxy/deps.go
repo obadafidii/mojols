@@ -23,9 +23,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tdadadavid/mojols/server/internal/discover"
-	"github.com/tdadadavid/mojols/server/internal/imports"
-	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
+	"github.com/obadafidii/mojols/server/internal/discover"
+	"github.com/obadafidii/mojols/server/internal/imports"
+	"github.com/obadafidii/mojols/server/internal/jsonrpc"
 )
 
 const (

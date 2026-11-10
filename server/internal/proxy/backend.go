@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
-	"github.com/tdadadavid/mojols/server/internal/trace"
+	"github.com/obadafidii/mojols/server/internal/jsonrpc"
+	"github.com/obadafidii/mojols/server/internal/trace"
 )
 
 // Command is how to start one backend process.

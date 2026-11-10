@@ -10,7 +10,7 @@ use zed_extension_api::{self as zed, settings::LspSettings, LanguageServerId, Re
 
 const SERVER_ID: &str = "mojols";
 const BINARY: &str = "mojols";
-const RELEASES_REPO: &str = "tdadadavid/mojols";
+const RELEASES_REPO: &str = "obadafidii/mojols";
 
 struct MojolsExtension {
     cached_binary: Option<String>,
@@ -47,7 +47,7 @@ impl MojolsExtension {
                 );
                 Err(format!(
                     "mojols not found ({err}).\n\
-                     Install it with:\n  go install github.com/tdadadavid/mojols/server/cmd/mojols@latest\n\
+                     Install it with:\n  go install github.com/obadafidii/mojols/server/cmd/mojols@latest\n\
                      or point Zed at a build:\n  \"lsp\": {{ \"mojols\": {{ \"binary\": {{ \"path\": \"/path/to/mojols\" }} }} }}"
                 ))
             }

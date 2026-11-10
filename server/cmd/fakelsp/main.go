@@ -6,7 +6,7 @@ package main
 import (
 	"os"
 
-	"github.com/tdadadavid/mojols/server/internal/fakelsp"
+	"github.com/obadafidii/mojols/server/internal/fakelsp"
 )
 
 func main() {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
+	"github.com/obadafidii/mojols/server/internal/jsonrpc"
 )
 
 // project lays out the two-package project measured on a real toolchain:

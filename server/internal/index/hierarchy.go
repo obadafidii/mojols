@@ -3,7 +3,7 @@ package index
 import (
 	"sort"
 
-	"github.com/tdadadavid/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/syntax"
 )
 
 // TypeAt returns the struct or trait for a type hierarchy at offset in f:

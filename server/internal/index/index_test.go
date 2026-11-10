@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tdadadavid/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/syntax"
 )
 
 // workspace writes files (path -> source; "|" marks nothing, it is plain

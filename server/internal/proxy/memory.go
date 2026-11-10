@@ -30,7 +30,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
+	"github.com/obadafidii/mojols/server/internal/jsonrpc"
 )
 
 // SampleRSS returns a process's resident memory in bytes using ps, which

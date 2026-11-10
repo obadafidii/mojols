@@ -1,7 +1,7 @@
 package index
 
 import (
-	"github.com/tdadadavid/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/syntax"
 )
 
 // maxDepth bounds every chain of resolution steps (imports through

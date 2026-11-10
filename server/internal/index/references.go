@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/tdadadavid/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/syntax"
 )
 
 // Workspace limits. A references search parses every file under the

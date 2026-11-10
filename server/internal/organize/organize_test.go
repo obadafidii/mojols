@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tdadadavid/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/syntax"
 )
 
 func apply(src string, path string) (string, bool) {

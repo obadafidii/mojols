@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/tdadadavid/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/syntax"
 )
 
 // OccurrenceAt returns the index of the identifier occurrence at offset in

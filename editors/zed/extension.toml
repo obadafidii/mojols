@@ -4,7 +4,7 @@ version = "0.1.0"
 schema_version = 1
 authors = ["David Dada <davidtofunmidada@gmail.com>"]
 description = "Mojo support backed by mojols, a supervised, workspace-aware language server around mojo-lsp-server."
-repository = "https://github.com/tdadadavid/mojols"
+repository = "https://github.com/obadafidii/mojols"
 snippets = ["./snippets/mojo.json"]
 
 [grammars.mojo]

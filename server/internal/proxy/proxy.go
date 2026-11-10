@@ -25,12 +25,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tdadadavid/mojols/server/internal/discover"
-	"github.com/tdadadavid/mojols/server/internal/index"
-	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
-	"github.com/tdadadavid/mojols/server/internal/text"
-	"github.com/tdadadavid/mojols/server/internal/trace"
-	"github.com/tdadadavid/mojols/server/internal/verify"
+	"github.com/obadafidii/mojols/server/internal/discover"
+	"github.com/obadafidii/mojols/server/internal/index"
+	"github.com/obadafidii/mojols/server/internal/jsonrpc"
+	"github.com/obadafidii/mojols/server/internal/text"
+	"github.com/obadafidii/mojols/server/internal/trace"
+	"github.com/obadafidii/mojols/server/internal/verify"
 )
 
 // Options configures a Server. Zero values take the defaults below.

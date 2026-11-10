@@ -23,11 +23,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tdadadavid/mojols/server/internal/discover"
-	"github.com/tdadadavid/mojols/server/internal/proxy"
-	pkgroots "github.com/tdadadavid/mojols/server/internal/roots"
-	"github.com/tdadadavid/mojols/server/internal/stdlib"
-	"github.com/tdadadavid/mojols/server/internal/trace"
+	"github.com/obadafidii/mojols/server/internal/discover"
+	"github.com/obadafidii/mojols/server/internal/proxy"
+	pkgroots "github.com/obadafidii/mojols/server/internal/roots"
+	"github.com/obadafidii/mojols/server/internal/stdlib"
+	"github.com/obadafidii/mojols/server/internal/trace"
 )
 
 // version is set at release time with -ldflags "-X main.version=v0.1.0".

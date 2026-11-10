@@ -12,11 +12,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tdadadavid/mojols/server/internal/index"
-	"github.com/tdadadavid/mojols/server/internal/jsonrpc"
-	"github.com/tdadadavid/mojols/server/internal/syntax"
-	"github.com/tdadadavid/mojols/server/internal/text"
-	"github.com/tdadadavid/mojols/server/internal/verify"
+	"github.com/obadafidii/mojols/server/internal/index"
+	"github.com/obadafidii/mojols/server/internal/jsonrpc"
+	"github.com/obadafidii/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/text"
+	"github.com/obadafidii/mojols/server/internal/verify"
 )
 
 // indexMethods are answered from mojols' own workspace index. They work

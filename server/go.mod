@@ -1,3 +1,3 @@
-module github.com/tdadadavid/mojols/server
+module github.com/obadafidii/mojols/server
 
 go 1.24

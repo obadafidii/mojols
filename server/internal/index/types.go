@@ -3,7 +3,7 @@ package index
 import (
 	"strings"
 
-	"github.com/tdadadavid/mojols/server/internal/syntax"
+	"github.com/obadafidii/mojols/server/internal/syntax"
 )
 
 // Type is what an expression evaluates to: a struct, trait or module (or,
