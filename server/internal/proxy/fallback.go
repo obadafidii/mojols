@@ -21,7 +21,7 @@ func (s *Server) fallbackResult(m *jsonrpc.Message) (any, bool) {
 		return s.indexOutline(m), true
 	case "textDocument/codeAction":
 		actions := []any{}
-		if a, ok := s.organizeAction(m.Params); ok {
+		for _, a := range s.actions(m.Params) {
 			actions = append(actions, a)
 		}
 		return actions, true

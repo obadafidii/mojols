@@ -1375,3 +1375,16 @@ func (p *parser) finish() {
 // IsKeyword reports whether name is reserved (it cannot name anything
 // unless written in backticks).
 func IsKeyword(name string) bool { return hardKeywords[name] }
+
+// IsIdent reports whether name is a plain identifier (not a keyword).
+func IsIdent(name string) bool {
+	if name == "" || !isIdentStart(name[0]) || hardKeywords[name] {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		if c := name[i]; !isIdentStart(c) && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
+}

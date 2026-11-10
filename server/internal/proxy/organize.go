@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/obadafidii/mojols/server/internal/jsonrpc"
 	"github.com/obadafidii/mojols/server/internal/organize"
 )
 
@@ -85,27 +84,6 @@ func (s *Server) organizeAction(params json.RawMessage) (map[string]any, bool) {
 		"kind":  organizeKind,
 		"edit":  map[string]any{"changes": map[string][]textEdit{p.TextDocument.URI: {edit}}},
 	}, true
-}
-
-// withOrganize appends the organize action to a backend's code action
-// result.
-func (s *Server) withOrganize(params json.RawMessage, m *jsonrpc.Message) *jsonrpc.Message {
-	if m.Error != nil {
-		return m
-	}
-	a, ok := s.organizeAction(params)
-	if !ok {
-		return m
-	}
-	var actions []json.RawMessage
-	if len(m.Result) > 0 && string(m.Result) != "null" && json.Unmarshal(m.Result, &actions) != nil {
-		return m // not a list: leave it alone
-	}
-	raw, _ := json.Marshal(a)
-	actions = append(actions, raw)
-	out := *m
-	out.Result, _ = json.Marshal(actions)
-	return &out
 }
 
 // inPackage reports whether path is a module of a package (its directory

@@ -50,6 +50,8 @@ func main() {
 		fmt.Println("mojols", fullVersion())
 	case "debug-parse": // undocumented: mojols' own parse as JSON
 		os.Exit(debugParse(args))
+	case "debug-inspect": // undocumented: validate inspections on files
+		os.Exit(debugInspect(os.Args[2:]))
 	case "debug-organize": // undocumented: organize imports in files
 		os.Exit(debugOrganize(args))
 	case "debug-resolve": // undocumented: what each identifier resolves to
@@ -81,6 +83,7 @@ func serve(args []string) int {
 	useIndex := fs.Bool("index", true, "answer definition, references, rename and workspace symbols from mojols' own workspace index (works across files and while mojo-lsp-server is down)")
 	stdlibSrc := fs.String("stdlib-sources", "auto", "where to find the stdlib's sources for go to definition into std: auto (matching the installed Mojo, downloaded once from GitHub into the user cache), off, or a directory containing std/")
 	verifyRefs := fs.Bool("verify", true, "confirm references the index cannot resolve on its own with a separate mojo-lsp-server, started on demand and stopped when idle")
+	inspect := fs.Bool("inspections", true, "report unused imports and offer quick fixes (add a missing import, remove an unused one, discard an unused variable)")
 	isolate := fs.Bool("isolate-completion", true, "run completion and signature help in a second mojo-lsp-server, so its crashes never reach the main one")
 	crashDir := fs.String("crash-dir", "", "save a replayable bundle (requests in flight, document texts) for every mojo-lsp-server crash here")
 	var extra []string
@@ -147,6 +150,7 @@ func serve(args []string) int {
 		IsolateCompletion: *isolate,
 		NoIndex:           !*useIndex,
 		NoVerify:          !*verifyRefs,
+		NoInspect:         !*inspect,
 		StdlibSources:     *stdlibSrc,
 		Resolve: func(roots []string) (proxy.Command, error) {
 			res, err := discover.Find(*backend, roots, discover.OSEnv())

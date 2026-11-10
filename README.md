@@ -42,6 +42,11 @@ mojols parses Mojo itself (a hand-written, error-tolerant parser in Go) and reso
 - **Type hierarchy**: supertypes (the traits a type lists) and subtypes (every struct or trait that lists it).
 - **Call hierarchy**: incoming and outgoing calls, with constructions counted as calls to `__init__`.
 - **Organize imports** as a code action: merges, sorts and groups the leading import block, wraps long lines as `mojo format` does, and removes imports the file doesn't use. Package `__init__.mojo` files keep every import, since they re-export.
+- **Unused imports** are reported (faded in the editor), with fixes to remove one or all of them. Package modules are left alone, since their imports can be re-exports.
+- **Quick fixes** for the official server's diagnostics:
+  - *unknown declaration*: "Import 'X' from module", found in the workspace and the stdlib, added to the import block in the right place;
+  - *assignment was never used*: assign to `_` instead;
+  - *loop variable was never used*: rename it to `_`.
 - **Go to definition into the stdlib.** The installed Mojo ships only compiled `std`, so mojols downloads the matching sources from GitHub once into your user cache, or uses a directory you point it at.
 
 Measured against the official server on the Mojo 1.1 stdlib and its tests (579 files):
@@ -52,6 +57,7 @@ Measured against the official server on the Mojo 1.1 stdlib and its tests (579 f
 | References, 6,456 stdlib symbols | 96.8% exactly the compiler's set |
 | References latency | p50 1 ms, p95 2 ms warm |
 | Members resolved in code that uses the stdlib | 4.4% before stdlib sources, 86.2% after |
+| "Import X" quick fix, 1,709 names the stdlib tests import | the right module is the first choice for 95.5%; the rest are private names it doesn't offer |
 | Organize imports on all 579 files | 347 changed, a second pass changes none, no file stops compiling |
 
 Details and methodology: [docs/design.md](docs/design.md).
@@ -73,8 +79,6 @@ Diagnostics, completion, signature help, semantic highlighting, inlay hints, the
 | --- | --- |
 | Zed extension in Zed's extension list | In progress: first release, then the registry submission |
 | CLion plugin, on JetBrains' built-in LSP client | Planned next ([editors/clion](editors/clion/README.md)) |
-| Inspections: unused imports and variables, unresolved names | Planned |
-| Quick fixes: add a missing import (from the workspace and stdlib), remove an unused one | Planned |
 | Refactorings: extract variable, extract function, inline variable | Planned |
 | Run and test: "run file" and "run test" in Zed, run configurations in CLion | Planned |
 | Debugging through the toolchain's LLDB debug adapter | Planned |
@@ -129,6 +133,7 @@ mojols [serve] [flags] [-- extra mojo-lsp-server args]
   --index=false                don't answer from mojols' own index
   --verify=false               don't confirm references with a second mojo-lsp-server
   --stdlib-sources auto|off|DIR  stdlib sources for go to definition into std (default auto: download once)
+  --inspections=false          no unused-import diagnostics or quick fixes
   --isolate-completion=false   run completion in the main mojo-lsp-server
   --max-resident-docs N        documents open in mojo-lsp-server at once (default 20; -1 = no cap)
   --memory-limit-mb N          recycle mojo-lsp-server above this resident memory (default 3072; -1 = never)

@@ -172,7 +172,7 @@ func (s *Server) attributeCrashLocked(gen int) string {
 // releaseLocked gives a quarantined document another chance.
 func (s *Server) releaseLocked(uri string) {
 	delete(s.quarantine, uri)
-	go s.write(quarantineDiagnostics(uri, false))
+	s.publishDiagnostics(quarantineDiagnostics(uri, false))
 	if !slices.Contains(s.probeQueue, uri) {
 		s.probeQueue = append(s.probeQueue, uri)
 	}
@@ -190,7 +190,7 @@ func (s *Server) handleBlockedSyncLocked(method, uri string) bool {
 			if d, ok := s.docs.Get(uri); ok && contentHash(d.Text) != q.hash {
 				s.releaseLocked(uri) // reopened with different content
 			} else {
-				go s.write(quarantineDiagnostics(uri, true))
+				s.publishDiagnostics(quarantineDiagnostics(uri, true))
 			}
 			return true
 		}

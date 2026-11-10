@@ -82,6 +82,9 @@ type Options struct {
 	// NoVerify turns off confirming, with a separate mojo-lsp-server,
 	// references the index cannot resolve statically.
 	NoVerify bool
+	// NoInspect turns off mojols' own diagnostics (unused imports) and
+	// quick fixes.
+	NoInspect bool
 	// ReferencesWait bounds how long find-references waits for that
 	// confirmation (1.5 s); RenameWait, how long rename waits (20 s).
 	ReferencesWait, RenameWait time.Duration
@@ -280,6 +283,8 @@ type Server struct {
 	lastCmd Command // the backend command of the current generation, for crash bundles
 
 	side *sidecar
+	// diags orders diagnostics on their way to the editor (see actions.go).
+	diags diagQueue
 	// ix is mojols' own workspace index (nil with Options.NoIndex).
 	ix *index.Index
 	// verifier confirms references mojols cannot resolve statically
@@ -1017,7 +1022,7 @@ func (s *Server) backendFailed(gen int, reason error) {
 	s.sendAll(replies)
 	if convicted != "" {
 		s.log.Warn("document quarantined", "uri", convicted)
-		s.write(quarantineDiagnostics(convicted, true))
+		s.publishDiagnostics(quarantineDiagnostics(convicted, true))
 		s.showMessage(2, fmt.Sprintf("mojols: %s crashes mojo-lsp-server, so it is quarantined. Other files keep full features; save a change to it to retry.", fileName(convicted)))
 	}
 	if enteringDegraded {
@@ -1082,7 +1087,9 @@ func (s *Server) onBackendMessage(b *backend, m *jsonrpc.Message) {
 		out := *m
 		out.ID = &p.clientID
 		if p.method == "textDocument/codeAction" && s.ix != nil {
-			s.write(s.withOrganize(p.msg.Params, &out))
+			// Off this goroutine: import candidates can scan the workspace.
+			params := p.msg.Params
+			go func() { s.write(s.withActions(params, &out)) }()
 			return
 		}
 		s.write(&out)
@@ -1126,7 +1133,11 @@ func (s *Server) onBackendMessage(b *backend, m *jsonrpc.Message) {
 		}
 		s.mu.Unlock()
 		if current {
-			s.write(m)
+			if m.Method == "textDocument/publishDiagnostics" {
+				s.publishDiagnostics(m)
+			} else {
+				s.write(m)
+			}
 		}
 	}
 }
