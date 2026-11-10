@@ -1,121 +1,206 @@
 # mojols
 
-A robust language server for Mojo, for Zed and CLion.
+A robust Mojo language server for Zed, with CLion support on the way.
 
-mojols sits between your editor and Modular's official `mojo-lsp-server`. The official server stays the source of truth for types and semantics. mojols owns everything around it: keeping it alive, keeping it in sync, and (from M2 on) a workspace-wide index that adds cross-file features the official server does not have.
+mojols sits between your editor and Modular's official `mojo-lsp-server`. The official server stays the source of truth for types, diagnostics and completion. mojols keeps it alive, routes around its crashes, and adds a workspace-wide index of its own: cross-file navigation, references, rename, hierarchies and organize imports, which keep working even while the official server is down.
 
 The rule mojols enforces: **the backend is allowed to fail; mojols is not.**
 
-Design doc: [Mojo LSP: Design Doc](https://claude.ai/artifact/9rWQUQFcebHzUmnJzXF4qK) (summary in [docs/design.md](docs/design.md)).
+## mojols and the `mojo` Zed extension
 
-## Status: M0 (pass-through spike)
+They work at different layers, and you install both.
 
-| Works today | How it is tested |
+| | `mojo` extension ([vadim-su/zed_mojo](https://github.com/vadim-su/zed_mojo)) | `mojols` extension (this repo) |
+| --- | --- | --- |
+| What it is | The Mojo language for Zed | A language server |
+| Provides | Grammar, syntax highlighting, outline queries, snippets | Everything that needs to understand code: hover, navigation, references, rename, completion, diagnostics |
+| Language server | Starts `mojo-lsp-server` directly and passes requests through unchanged | Runs `mojo-lsp-server` under supervision and answers many requests itself |
+| When the official server crashes | Every feature stops until Zed restarts it ("server shut down") | The server is restarted, the file that crashed it is set aside, and hover and outline keep working from mojols' index |
+
+So `mojo` makes Mojo files look right, and mojols makes them work right. mojols attaches to the Mojo language that `mojo` defines, and replaces the bare server it would otherwise start (see [Zed setup](#zed)).
+
+## Features
+
+### Reliability around the official server
+
+- **Crash recovery.** If `mojo-lsp-server` dies, in-flight requests fail cleanly, it restarts with backoff, and the editor's state (every open document) is replayed into the new process.
+- **Crash quarantine.** A file that crashes the server is found automatically and kept away from it. Every other file keeps full features; saving the file with different content retries it.
+- **Answers from source while the server is down.** Hover (signature, enclosing type, docstring) and the document outline come from mojols' own parser for quarantined files and while the server is in degraded mode. Other requests get empty results instead of errors.
+- **Completion isolation.** Completion and signature help, which caused every crash observed so far, run in a second, sacrificial server. A completion crash costs one empty completion list, never hover or diagnostics.
+- **Hangs and crash loops.** Per-request deadlines, cancellation forwarded to the server, a kill after 3 consecutive timeouts. After 5 crashes in 2 minutes mojols enters degraded mode, tells you once, and retries every 2 minutes.
+- **Memory caps.** At most 20 documents are open in the server at once (about 31 MB each); others reopen transparently when touched. Above 3 GB the server is recycled without failing a request.
+- **Cross-file freshness.** Saving a file, or changing it on disk, re-checks every open file that imports it, transitively.
+
+### Code intelligence from mojols' own index
+
+mojols parses Mojo itself (a hand-written, error-tolerant parser in Go) and resolves every identifier across the workspace, including generic types carried through calls, subscripts, loops and literals.
+
+- **Go to definition** across files, into packages, and into the stdlib's sources (see below).
+- **Find references**, with anything the index can't resolve on its own confirmed by a separate `mojo-lsp-server`.
+- **Rename** across the workspace. It refuses rather than guesses if any possible use is unconfirmed, and never edits library files.
+- **Workspace symbols.**
+- **Type hierarchy**: supertypes (the traits a type lists) and subtypes (every struct or trait that lists it).
+- **Call hierarchy**: incoming and outgoing calls, with constructions counted as calls to `__init__`.
+- **Organize imports** as a code action: merges, sorts and groups the leading import block, wraps long lines as `mojo format` does, and removes imports the file doesn't use. Package `__init__.mojo` files keep every import, since they re-export.
+- **Go to definition into the stdlib.** The installed Mojo ships only compiled `std`, so mojols downloads the matching sources from GitHub once into your user cache, or uses a directory you point it at.
+
+Measured against the official server on the Mojo 1.1 stdlib and its tests (579 files):
+
+| Check | Result |
 | --- | --- |
-| Transparent LSP proxy over stdio, ids remapped in both directions | `TestPassThrough`, `TestServerRequestRoundTrip` |
-| Backend crash: in-flight requests fail with `ContentModified`, restart with backoff, editor state replayed (initialize, initialized, every open document) | `TestCrashRestartsAndReplays` |
-| Crash loop (5 in 2 min): degraded mode, editor told once, retry every 2 min; `initialize` is always answered | `TestCrashLoopEntersDegradedMode`, `TestMissingBackendDegradesWithoutHanging` |
-| Hang: per-method deadlines, `$/cancelRequest` to the backend, kill after 3 consecutive timeouts | `TestHangIsDetectedAndKilled` |
-| Garbage from the backend is dropped and counted, never forwarded | `TestGarbageReplyIsContained` |
-| Cancellation forwarded; queued requests cancelled locally | `TestCancelReachesBackend` |
-| Editor hangs up: backend never orphaned | `TestEditorHangupKillsBackend` |
-| A file that crashes the backend is found and quarantined: suspects are reopened one at a time, the guilty file gets an in-file warning and fast errors, every other file keeps full features, saving different content retries it | `TestPoisonedFileIsQuarantined`, `TestOnlyTheGuiltySuspectIsQuarantined`, `TestRequestCrashQuarantinesNothing` |
-| Package roots inferred and passed as `-I` (parent of every top-level package and `.mojopkg`), re-scanned before each backend start; stdlib copies and environments are never added | `internal/roots` tests, `mojols doctor` |
-| Saving a file, or changing it on disk (watchers registered with the editor), re-checks every open file that imports it, transitively | `TestSaveRefreshesTransitiveDependents`, `TestDiskChangeRefreshesDependents`, `TestNewImportIsFollowed`, `scripts/invalidation_probe.py` |
-| Memory: at most 20 documents open in the backend (measured ~31 MB each), least recently used reopened on touch with their current text and their diagnostics kept; above 3 GB the backend is recycled without failing a request | `TestResidencyCapEvictsLeastRecentlyUsed`, `TestEditsToEvictedDocumentSurvive`, `TestRecycleOverMemoryLimitFailsNothing`, `scripts/memory_probe.py` |
-| Completion and signature help run in a second, sacrificial mojo-lsp-server (they caused every observed crash): a crash costs one empty, incomplete completion list, never the main server; a crashing completion is not retried; repeated crashes pause completion for 2 minutes | `TestCompletionCrashLeavesTheMainBackendAlone`, `TestRepeatedCompletionCrashesPause`, `scripts/replay_crash.py` |
-| UTF-16/UTF-8/UTF-32 positions, incremental edits | table tests + `FuzzOffset` against a reference implementation |
-| Strict JSON-RPC framing and decoding | table tests + `FuzzReader` |
-| `mojols doctor`, `mojols/status`, `--trace-file` session recording | manual, `scripts/m0_probe.py` |
+| Go to definition, 158,789 occurrences | 98.99% precision, 98.00% recall |
+| References, 6,456 stdlib symbols | 96.8% exactly the compiler's set |
+| References latency | p50 1 ms, p95 2 ms warm |
+| Members resolved in code that uses the stdlib | 4.4% before stdlib sources, 86.2% after |
+| Organize imports on all 579 files | 347 changed, a second pass changes none, no file stops compiling |
 
-First real-toolchain finding: `mojo-lsp-server` segfaults on `std/io/io.mojo` from a modular checkout (crash in `string_literal.mojo:69`, likely a source/toolchain version mismatch). Before quarantine that put every file in degraded mode after 5 crashes; now it costs that one file, after 2.
+Details and methodology: [docs/design.md](docs/design.md).
 
-That crash turned out to be a version mismatch: modular `main` is Mojo 1.3.0.dev, the installed server is 1.1.0. The same file from the `mojo/v1.1.0` tag parses cleanly. M0 is done; results are in [docs/design.md](docs/design.md#m0-findings-mojo-110-macos-arm64-nov-8-2026).
+### Toolchain and project setup
 
-M1 so far: package roots are inferred; importers are refreshed on save; memory is capped. Next: the 8-hour soak test.
+- **Finds the right `mojo-lsp-server` per project**: the project's pixi, magic or venv environment first, then PATH and the usual install locations. It looks again before every restart, so installing Mojo while the editor is open recovers on its own.
+- **Package roots.** Top-level packages and `.mojopkg` files in the workspace are passed to the server as `-I` include paths, so imports between your own packages resolve.
+- **`mojols doctor`** explains which server it picked and why, the inferred package roots, and the stdlib sources status.
+- **Bug reports.** `--trace-file` records a session as JSON lines, and `--crash-dir` saves a replayable bundle for every server crash.
 
-## Quick start
+### Passed through from the official server
 
-Needs Go 1.24+ and a Mojo toolchain (`mojo-lsp-server` on PATH, or in the project's `.pixi` env).
+Diagnostics, completion, signature help, semantic highlighting, inlay hints, the server's own quick fixes, and hover (when the server is healthy) come from `mojo-lsp-server` unchanged.
 
-```sh
-make build                 # bin/mojols, bin/fakelsp
-bin/mojols doctor .        # which mojo-lsp-server will be used, and why
-make test                  # unit + chaos tests, race detector on
-```
+## In progress and planned
 
-Measure the real server (M0 open questions):
+| Feature | Status |
+| --- | --- |
+| Zed extension in Zed's extension list | In progress: first release, then the registry submission |
+| CLion plugin, on JetBrains' built-in LSP client | Planned next ([editors/clion](editors/clion/README.md)) |
+| Inspections: unused imports and variables, unresolved names | Planned |
+| Quick fixes: add a missing import (from the workspace and stdlib), remove an unused one | Planned |
+| Refactorings: extract variable, extract function, inline variable | Planned |
+| Run and test: "run file" and "run test" in Zed, run configurations in CLion | Planned |
+| Debugging through the toolchain's LLDB debug adapter | Planned |
+| Discovery: the nearest `.pixi` above each file (for monorepos like modular), conda environments | Planned |
+| Use a stdlib checkout in the workspace as the stdlib sources automatically | Planned |
+| On-disk index cache for faster cold starts | Planned |
 
-```sh
-make probe FILES="path/to/some.mojo path/to/other.mojo"
-```
+## Install
 
 ### Zed
 
-1. Install the `mojo` extension from Zed's extension list. It provides the Mojo language: grammar, highlighting and snippets.
-2. Put `mojols` on your PATH (`cp bin/mojols ~/go/bin/` or `go install ./server/cmd/mojols` from `server/`), or let the extension download the latest release.
-3. In Zed: `zed: extensions` → **Install Dev Extension** → choose `editors/zed`. This extension is only the language server.
-4. Turn off the `mojo` extension's direct `mojo-lsp-server`, since mojols already runs and supervises it:
-   `"languages": {"Mojo": {"language_servers": ["mojols", "!mojo-lsp-server", "..."]}}`
+1. Install the **mojo** extension from Zed's extension list. It provides the Mojo language itself.
+2. Install mojols:
+   - **Release build**: the mojols extension downloads the latest [release](https://github.com/obadafidii/mojols/releases) by itself if `mojols` isn't on your PATH.
+   - **From source**: `make build` and copy `bin/mojols` onto your PATH, or `go install github.com/obadafidii/mojols/server/cmd/mojols@latest`.
+3. Install the **mojols** extension. Until it's in Zed's list: `zed: install dev extension` and pick `editors/zed`.
+4. Turn off the `mojo` extension's direct server, since mojols already runs and supervises it:
 
-Options go in Zed settings:
+   ```json
+   "languages": {
+     "Mojo": { "language_servers": ["mojols", "!mojo-lsp-server", "..."] }
+   }
+   ```
+
+5. Open a Mojo project, and run `mojols doctor` in it if anything looks off.
+
+### CLion
+
+Not available yet; see [In progress and planned](#in-progress-and-planned).
+
+## Configuration
+
+In Zed, mojols' flags go in your settings:
 
 ```json
-{
-  "lsp": {
-    "mojols": {
-      "binary": {
-        "path": "~/go/bin/mojols",
-        "arguments": ["--log-level", "debug", "--trace-file", "/tmp/mojols-trace.jsonl"]
-      }
+"lsp": {
+  "mojols": {
+    "binary": {
+      "path": "/path/to/mojols",
+      "arguments": ["--log-file", "/tmp/mojols.log"]
     }
   }
 }
 ```
 
-### CLion
-
-Planned for M4 on JetBrains' LSP API. See [editors/clion](editors/clion/README.md).
-
-## Command line
-
 ```
 mojols [serve] [flags] [-- extra mojo-lsp-server args]
-  --backend PATH      mojo-lsp-server to run (default: discover)
-  -I DIR              include dir passed to mojo-lsp-server (repeatable; wins over inferred ones)
-  --infer-roots=false do not scan the workspace for package roots
-  --refresh-dependents=false  do not re-check importers when a file is saved
-  --max-resident-docs N       documents open in mojo-lsp-server at once (default 20; -1 = no cap)
-  --memory-limit-mb N         recycle mojo-lsp-server above this resident memory (default 3072; -1 = never)
-  --settle-requests           hold a request on a file until the server has parsed its latest edit (experimental)
-  --crash-dir DIR             save a replayable bundle for every mojo-lsp-server crash (see scripts/replay_crash.py)
-  --isolate-completion=false  run completion in the main mojo-lsp-server instead of a separate one
-  --log-file PATH     logs (default: stderr; stdout carries the protocol)
-  --log-level LEVEL   debug | info | warn | error
-  --trace-file PATH   record every message as JSON lines
-mojols doctor [dir]   explain backend discovery and inferred package roots for a workspace
+  --backend PATH               mojo-lsp-server to run (default: discover)
+  -I DIR                       include dir for mojo-lsp-server (repeatable; wins over inferred ones)
+  --infer-roots=false          don't scan the workspace for package roots
+  --refresh-dependents=false   don't re-check importers when a file is saved
+  --index=false                don't answer from mojols' own index
+  --verify=false               don't confirm references with a second mojo-lsp-server
+  --stdlib-sources auto|off|DIR  stdlib sources for go to definition into std (default auto: download once)
+  --isolate-completion=false   run completion in the main mojo-lsp-server
+  --max-resident-docs N        documents open in mojo-lsp-server at once (default 20; -1 = no cap)
+  --memory-limit-mb N          recycle mojo-lsp-server above this resident memory (default 3072; -1 = never)
+  --settle-requests            hold a request until the server has parsed the latest edit (experimental)
+  --crash-dir DIR              save a replayable bundle for every mojo-lsp-server crash
+  --log-file PATH              logs (default: stderr; stdout carries the protocol)
+  --log-level LEVEL            debug | info | warn | error
+  --trace-file PATH            record every message as JSON lines
+mojols doctor [dir]            explain server discovery, package roots and stdlib sources
+mojols stdlib [dir]            download the stdlib sources for the installed Mojo now
 mojols version
 ```
 
-Discovery order: `--backend`, `$MOJOLS_BACKEND`, the workspace's `.pixi/envs/default/bin`, `.magic/envs/default/bin`, `.venv/bin`, `PATH`, then `~/.pixi/bin`, `~/.mojo/bin`, `~/.modular/bin`, `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`. It runs again before every restart, so installing Mojo while the editor is open recovers on the next retry.
+Server discovery order: `--backend`, `$MOJOLS_BACKEND`, the workspace's `.pixi/envs/default/bin`, `.magic/envs/default/bin`, `.venv/bin`, `PATH`, then `~/.pixi/bin`, `~/.mojo/bin`, `~/.modular/bin`, `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`.
 
-## Layout
+## How it works
 
 ```
-server/                  Go module (stdlib only)
-  cmd/mojols             the server
-  cmd/fakelsp            scriptable fake backend for manual chaos testing
-  internal/jsonrpc       framing + strict message decoding
-  internal/text          position encodings, incremental edits, document store
-  internal/proxy         supervisor, router, restart + replay, timeouts, degraded mode
+editor ──LSP── mojols ──LSP── mojo-lsp-server            (main: diagnostics, hover, ...)
+                 │    └─LSP── mojo-lsp-server            (completion, sacrificial)
+                 │    └─LSP── mojo-lsp-server            (reference checks, on demand)
+                 └── index: syntax layer + resolver over the workspace and stdlib sources
+```
+
+mojols is one static Go binary with no dependencies outside the Go standard library.
+
+```
+server/
+  cmd/mojols             the server and its commands
+  internal/proxy         supervisor, routing, restart and replay, quarantine, fallbacks
+  internal/syntax        Mojo lexer and parser
+  internal/index         workspace index, resolver, type engine, hierarchies
+  internal/verify        reference checks with a second mojo-lsp-server
+  internal/organize      organize imports
+  internal/stdlib        fetching the stdlib sources for the installed Mojo
   internal/discover      finding mojo-lsp-server
-  internal/fakelsp       the fake backend used by the chaos tests
-  internal/trace         JSON-lines session recording
-editors/zed              Zed extension (Rust → WebAssembly)
-editors/clion            CLion plugin (M4)
-scripts/m0_probe.py      measures the real server through mojols
-scripts/release.sh       dist/mojols_<os>_<arch>.tar.gz (the names the Zed extension downloads)
+  internal/roots         inferring package roots
+  internal/imports       the import graph for cross-file refresh
+  internal/jsonrpc       framing and strict message decoding
+  internal/text          position encodings, incremental edits
+  internal/fakelsp       a scriptable fake server for the chaos tests
+editors/zed              Zed extension (Rust, compiled to WebAssembly)
+editors/clion            CLion plugin (planned)
+scripts/                 probes, soak test, and the scoring scripts behind the numbers above
+docs/design.md           design notes and measurements
 ```
+
+## Development
+
+Needs Go 1.24+ and, for real-server checks, a Mojo toolchain.
+
+```sh
+make build        # bin/mojols and bin/fakelsp
+make test         # unit and chaos tests with the race detector
+make fuzz         # 30 s per fuzz target
+make zed-check    # type-check the Zed extension
+make release      # cross-compile dist/mojols_<os>_<arch>.tar.gz
+```
+
+Releases are published by pushing a `v*` tag; the workflow builds the archives the Zed extension downloads.
+
+## Milestones
+
+| | Scope | Status |
+| --- | --- | --- |
+| M0 | Pass-through proxy, fake server, chaos tests, Zed dev extension | Done |
+| M1 | Crash quarantine, completion isolation, memory caps, cross-file refresh, 8-hour soak | Done |
+| M2 | mojols' own parser and workspace index | Done (on-disk cache still to come) |
+| M3 | Cross-file definition, references, rename, hierarchies, organize imports, stdlib sources | Done |
+| M4 | Zed extension listed, CLion plugin on the Marketplace | In progress |
+
+Findings and measurements for each milestone are in [docs/design.md](docs/design.md).
 
 ## License
 
