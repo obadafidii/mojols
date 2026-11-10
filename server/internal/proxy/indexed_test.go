@@ -364,3 +364,83 @@ func TestStdlibSources(t *testing.T) {
 		t.Errorf("rename of a stdlib method: %v %s", m.Error, m.Result)
 	}
 }
+
+func TestIndexCallHierarchy(t *testing.T) {
+	dir := indexedWorkspace(t)
+	os.WriteFile(filepath.Join(dir, "pkg/geo/shapes.mojo"), []byte(`struct Circle:
+    var r: Float64
+
+    def __init__(out self, r: Float64):
+        self.r = r
+
+    def scaled(self, k: Float64) -> Circle:
+        return Circle(self.r * k)
+
+def area(c: Circle) -> Float64:
+    return c.r * c.r
+`), 0o644)
+	os.WriteFile(filepath.Join(dir, "app/main.mojo"), []byte(`from geo import area, Circle
+
+def total(cs: List[Circle]) -> Float64:
+    var t = 0.0
+    for c in cs:
+        t += area(c) + area(Circle(3.0).scaled(2))
+    return t
+
+def main():
+    var c = Circle(2.0)
+    print(area(c), total([c]))
+
+area(Circle(1.0))
+`), 0o644)
+	h := newIndexedHarness(t, dir, nil, false)
+	mainURI := pathToURI(filepath.Join(dir, "app/main.mojo"))
+	shapesURI := pathToURI(filepath.Join(dir, "pkg/geo/shapes.mojo"))
+
+	var items []map[string]any
+	h.callOK("textDocument/prepareCallHierarchy", map[string]any{"textDocument": map[string]any{"uri": shapesURI}, "position": pos(9, 4)}, &items)
+	if len(items) != 1 || items[0]["name"] != "area" {
+		t.Fatalf("prepare on area: %+v", items)
+	}
+	var in []struct {
+		From       map[string]any `json:"from"`
+		FromRanges []any          `json:"fromRanges"`
+	}
+	h.callOK("callHierarchy/incomingCalls", map[string]any{"item": items[0]}, &in)
+	got := map[string]int{}
+	for _, c := range in {
+		got[c.From["name"].(string)] = len(c.FromRanges)
+	}
+	// total calls area twice, main once, and the file's top level once;
+	// the import line is not a call.
+	if got["total"] != 2 || got["main"] != 1 || got["main.mojo"] != 1 || len(got) != 3 {
+		t.Errorf("incoming calls of area: %v", got)
+	}
+
+	h.callOK("textDocument/prepareCallHierarchy", map[string]any{"textDocument": map[string]any{"uri": mainURI}, "position": pos(2, 5)}, &items)
+	var out []struct {
+		To         map[string]any `json:"to"`
+		FromRanges []any          `json:"fromRanges"`
+	}
+	h.callOK("callHierarchy/outgoingCalls", map[string]any{"item": items[0]}, &out)
+	got = map[string]int{}
+	for _, c := range out {
+		got[c.To["name"].(string)] = len(c.FromRanges)
+	}
+	if got["area"] != 2 || got["Circle.scaled"] != 1 || got["Circle.__init__"] != 1 || len(got) != 3 {
+		t.Errorf("outgoing calls of total: %v", got)
+	}
+
+	// Constructing a struct is a call of its __init__.
+	h.callOK("textDocument/prepareCallHierarchy", map[string]any{"textDocument": map[string]any{"uri": shapesURI}, "position": pos(3, 9)}, &items)
+	h.callOK("callHierarchy/incomingCalls", map[string]any{"item": items[0]}, &in)
+	got = map[string]int{}
+	for _, c := range in {
+		got[c.From["name"].(string)] = len(c.FromRanges)
+	}
+	if got["Circle.scaled"] != 1 || got["main"] != 1 || got["main.mojo"] != 1 || got["total"] != 1 {
+		t.Errorf("incoming calls of __init__: %v", got)
+	}
+	// And the item reached that way can be followed further.
+	h.callOK("callHierarchy/outgoingCalls", map[string]any{"item": items[0]}, &out)
+}

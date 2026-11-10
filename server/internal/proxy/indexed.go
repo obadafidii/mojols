@@ -31,6 +31,9 @@ var indexMethods = map[string]bool{
 	"textDocument/prepareTypeHierarchy": true,
 	"typeHierarchy/supertypes":          true,
 	"typeHierarchy/subtypes":            true,
+	"textDocument/prepareCallHierarchy": true,
+	"callHierarchy/incomingCalls":       true,
+	"callHierarchy/outgoingCalls":       true,
 }
 
 // indexDocLocked mirrors a document change into the index. It only records
@@ -70,6 +73,7 @@ type indexParams struct {
 		Data struct {
 			Path   string `json:"path"`
 			Offset int    `json:"offset"`
+			Name   string `json:"name"`
 		} `json:"data"`
 	} `json:"item"`
 }
@@ -112,6 +116,22 @@ func (s *Server) handleIndexed(m *jsonrpc.Message) bool {
 	switch m.Method {
 	case "workspace/symbol":
 		s.reply(*m.ID, s.workspaceSymbols(p.Query))
+		return true
+	case "callHierarchy/incomingCalls", "callHierarchy/outgoingCalls":
+		name := p.Item.Data.Name
+		if name == "" {
+			name = p.Item.Name
+		}
+		fn, ok := s.ix.FuncDeclAt(p.Item.Data.Path, name, p.Item.Data.Offset)
+		if !ok {
+			s.reply(*m.ID, nil) // the function is gone (edited away)
+			return true
+		}
+		if m.Method == "callHierarchy/incomingCalls" {
+			s.reply(*m.ID, s.incomingCalls(fn))
+		} else {
+			s.reply(*m.ID, s.outgoingCalls(fn))
+		}
 		return true
 	case "typeHierarchy/supertypes", "typeHierarchy/subtypes":
 		t, ok := s.ix.DeclAt(p.Item.Data.Path, p.Item.Name, p.Item.Data.Offset)
@@ -168,6 +188,15 @@ func (s *Server) handleIndexed(m *jsonrpc.Message) bool {
 			out = append(out, s.loc(o.File, o.Span))
 		}
 		s.reply(*m.ID, out)
+		return true
+
+	case "textDocument/prepareCallHierarchy":
+		fn, ok := s.ix.FuncAt(f, offset)
+		if !ok {
+			s.reply(*m.ID, nil)
+			return true
+		}
+		s.reply(*m.ID, []map[string]any{s.callItem(fn)})
 		return true
 
 	case "textDocument/prepareTypeHierarchy":
@@ -516,6 +545,108 @@ func (s *Server) workspaceSymbols(query string) []map[string]any {
 	return out
 }
 
+// LSP SymbolKind values used only by call hierarchy items.
+const (
+	symModule      = 2
+	symConstructor = 9
+)
+
+// callItem is a CallHierarchyItem for a def.
+func (s *Server) callItem(t index.Target) map[string]any {
+	kind := symFunction
+	switch {
+	case t.Decl.Name == "__init__":
+		kind = symConstructor
+	case t.Decl.Parent != nil && isTypeKind(t.Decl.Parent.Kind):
+		kind = symMethod
+	}
+	enc := s.docs.Encoding()
+	item := map[string]any{
+		"name":           t.Decl.Name,
+		"kind":           kind,
+		"uri":            s.uriFor(t.File.Path),
+		"range":          t.File.Lines.Range(t.Decl.Span.Start, t.Decl.Span.End, enc),
+		"selectionRange": t.File.Lines.Range(t.Decl.NameSpan.Start, t.Decl.NameSpan.End, enc),
+		"data":           map[string]any{"path": t.File.Path, "offset": t.Decl.NameSpan.Start, "name": t.Decl.Name},
+	}
+	if h := t.File.Syn.Text(t.Decl.Header); h != "" {
+		item["detail"] = strings.Join(strings.Fields(h), " ")
+	}
+	if t.Decl.Parent != nil && isTypeKind(t.Decl.Parent.Kind) {
+		item["name"] = t.Decl.Parent.Name + "." + t.Decl.Name
+	}
+	return item
+}
+
+func isTypeKind(k syntax.DeclKind) bool { return k == syntax.KStruct || k == syntax.KTrait }
+
+// moduleItem stands for code at a file's top level, for calls made there.
+func (s *Server) moduleItem(f *index.File) map[string]any {
+	end := f.Lines.Position(len(f.Syn.Src), s.docs.Encoding())
+	return map[string]any{
+		"name":           filepath.Base(f.Path),
+		"kind":           symModule,
+		"uri":            s.uriFor(f.Path),
+		"range":          text.Range{End: end},
+		"selectionRange": text.Range{},
+		"data":           map[string]any{"path": f.Path, "offset": -1},
+	}
+}
+
+// incomingCalls lists who calls fn, grouped by calling def, with the call
+// sites. For __init__, constructing its struct (`Point(1, 2)`) counts.
+func (s *Server) incomingCalls(fn index.Target) []map[string]any {
+	occs, _ := s.referencesConfirmed(index.Symbol{File: fn.File, Decl: fn.Decl}, s.opts.ReferencesWait)
+	if fn.Decl.Name == "__init__" && fn.Decl.Parent != nil && fn.Decl.Parent.Kind == syntax.KStruct {
+		more, _ := s.referencesConfirmed(index.Symbol{File: fn.File, Decl: fn.Decl.Parent}, s.opts.ReferencesWait)
+		occs = append(occs, more...)
+	}
+	var calls []index.Occurrence
+	for _, o := range occs {
+		if !o.Decl && index.IsCall(o.File, o.Span) {
+			calls = append(calls, o)
+		}
+	}
+	out := []map[string]any{}
+	enc := s.docs.Encoding()
+	for _, c := range index.GroupCallers(calls) {
+		from := s.moduleItem(c.File)
+		if c.Func != nil {
+			from = s.callItem(index.Target{File: c.File, Decl: c.Func})
+		}
+		var ranges []text.Range
+		for _, sp := range c.Sites {
+			ranges = append(ranges, c.File.Lines.Range(sp.Start, sp.End, enc))
+		}
+		out = append(out, map[string]any{"from": from, "fromRanges": ranges})
+	}
+	return out
+}
+
+// outgoingCalls lists what fn calls, with the call sites in fn.
+func (s *Server) outgoingCalls(fn index.Target) []map[string]any {
+	out := []map[string]any{}
+	enc := s.docs.Encoding()
+	for _, c := range s.ix.OutgoingCalls(fn) {
+		to := s.callItem(c.To)
+		if c.To.Decl.Kind == syntax.KStruct {
+			// A construction: its __init__ when it declares one.
+			to = s.typeItem(c.To)
+			if c.To.Decl.Body != nil {
+				if inits := c.To.Decl.Body.Names["__init__"]; len(inits) > 0 {
+					to = s.callItem(index.Target{File: c.To.File, Decl: inits[0]})
+				}
+			}
+		}
+		var ranges []text.Range
+		for _, sp := range c.Sites {
+			ranges = append(ranges, fn.File.Lines.Range(sp.Start, sp.End, enc))
+		}
+		out = append(out, map[string]any{"to": to, "fromRanges": ranges})
+	}
+	return out
+}
+
 // typeItem is a TypeHierarchyItem for a struct or trait.
 func (s *Server) typeItem(t index.Target) map[string]any {
 	kind := symStruct
@@ -544,4 +675,5 @@ func indexCapabilities(caps map[string]any) {
 	caps["renameProvider"] = map[string]any{"prepareProvider": true}
 	caps["workspaceSymbolProvider"] = true
 	caps["typeHierarchyProvider"] = true
+	caps["callHierarchyProvider"] = true
 }
