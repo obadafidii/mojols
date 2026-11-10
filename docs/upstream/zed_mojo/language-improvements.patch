@@ -1,0 +1,320 @@
+From ae79a91edb58323d5fe7fb0f89457c350adb7705 Mon Sep 17 00:00:00 2001
+From: David Dada <davidtofunmidada@gmail.com>
+Date: Tue, 10 Nov 2026 21:00:01 +0100
+Subject: [PATCH] Improve Mojo language config, queries and snippets
+
+---
+ languages/mojo/config.toml     | 18 ++++++++-
+ languages/mojo/highlights.scm  | 16 +++-----
+ languages/mojo/indents.scm     |  2 +
+ languages/mojo/outline.scm     |  3 ++
+ languages/mojo/runnables.scm   |  9 +++++
+ languages/mojo/tasks.json      | 60 ++++++++++++++++++++++++++++
+ languages/mojo/textobjects.scm |  6 +++
+ snippets/mojo.json             | 72 +++++++++++++++++++++++++++++++++-
+ 8 files changed, 172 insertions(+), 14 deletions(-)
+
+diff --git a/languages/mojo/config.toml b/languages/mojo/config.toml
+index c954531..cf4d19d 100644
+--- a/languages/mojo/config.toml
++++ b/languages/mojo/config.toml
+@@ -1,6 +1,20 @@
+ name = "Mojo"
+ grammar = "mojo"
+-path_suffixes = ["mojo"]
++path_suffixes = ["mojo", "🔥"]
+ line_comments = ["# "]
++block_comment = ["\"\"\"", "\"\"\""]
+ tab_size = 4
+-completion_query_characters = [".", "@"]
++hard_tabs = false
++word_characters = ["_"]
++completion_query_characters = [".", "@", ":", "$"]
++autoclose_before = ";:.,=}])> \n\t"
++collapsible_comments = true
++
++brackets = [
++    { start = "{", end = "}", close = true, newline = true },
++    { start = "[", end = "]", close = true, newline = true },
++    { start = "(", end = ")", close = true, newline = true },
++    { start = "\"", end = "\"", close = true, newline = false },
++    { start = "'", end = "'", close = true, newline = false },
++]
++
+diff --git a/languages/mojo/highlights.scm b/languages/mojo/highlights.scm
+index 530dfe0..358c8f4 100644
+--- a/languages/mojo/highlights.scm
++++ b/languages/mojo/highlights.scm
+@@ -12,7 +12,7 @@
+ ; Identifier naming conventions
+ 
+ ((identifier) @type.builtin
+- (#match? @type.builtin "^(AnyType|Bool|DType|Dict|DynamicVector|Error|FalseType|Float16|Float32|Float64|Index|Int|Int8|Int16|Int32|Int64|List|NoneType|Object|Optional|SIMD|Self|String|Tuple|UInt|UInt8|UInt16|UInt32|UInt64|Variant|VariadicList|VariadicPack)$"))
++ (#match? @type.builtin "^(AnyType|Arc|Array|Atomic|BFloat16|Bool|Byte|CollectionElement|CollectionElementNew|Comparable|Copyable|Defaultable|Deinitable|DType|Dict|DynamicVector|EqualityComparable|Error|ExplicitlyCopyable|FalseType|Float16|Float32|Float64|Float8|FloatLiteral|Hashable|Identifiable|ImmutableOrigin|ImplicitlyCopyable|Index|InlineArray|Int|Int8|Int16|Int32|Int64|IntLiteral|KeyElement|List|Movable|MutableOrigin|MutUntrackedOrigin|NoneType|Object|OpaquePointer|Optional|Pointer|PyObjectPtr|Python|PythonObject|Representable|Scalar|Self|Set|SIMD|Span|StaticTuple|String|StringLiteral|StringSlice|Tuple|UInt|UInt8|UInt16|UInt32|UInt64|UnsafePointer|Variant|VariadicList|VariadicPack|Writable)$"))
+ 
+ ((identifier) @constructor
+  (#match? @constructor "^[A-Z]"))
+@@ -22,27 +22,22 @@
+ 
+ ; Builtin functions
+ 
+-; Audited against Mojo stdlib tag mojo/v1.0.0b1 (std/prelude/__init__.mojo).
+-; Python-only names (exec, eval, callable, compile, vars, bool, int, float,
+-; list, dict, set, str, tuple, ...) dropped — Mojo's equivalents are
+-; capitalized types (Bool, Int, Float64, List, Dict, ...) and already match
+-; the @constructor rule above. Lowercase Mojo-prelude callables retained;
+-; idiomatic Mojo builtins (abort, debug_assert, external_call, ...) added.
++; Audited against Mojo stdlib (Mojo 1.0 / 1.1).
+ ((call
+   function: (identifier) @function.builtin)
+  (#match?
+    @function.builtin
+-   "^(abort|abs|all|any|ascii|atof|atol|bin|breakpoint|chr|constrained|debug_assert|divmod|enumerate|external_call|hash|hex|input|iter|len|map|materialize|max|min|next|oct|open|ord|partition|pow|print|range|rebind|rebind_var|reflect|repr|reversed|round|slice|sort|swap|trait_downcast|trait_downcast_var|zip)$"))
++   "^(abort|abs|align_of|all|any|ascii|atof|atol|bin|bitcast|breakpoint|chr|conforms_to|constrained|debug_assert|divmod|enumerate|external_call|global_constant|has_trait|hash|hex|input|iter|len|map|materialize|max|min|next|oct|open|ord|parallelize|partition|pow|print|range|rebind|rebind_var|reflect|repr|reversed|round|simd_width|size_of|slice|sort|swap|trait_downcast|trait_downcast_var|type_of|unroll|unsafe_bitcast|unsafe_memcpy|vectorize|zip)$"))
+ 
+ ; Mojo built-in decorators (recognized before the generic @function below)
+ 
+ ((decorator
+   (identifier) @attribute.builtin)
+- (#match? @attribute.builtin "^(fieldwise_init|register_passable|parameter|value|always_inline|noinline|staticmethod|nonmaterializable)$"))
++ (#match? @attribute.builtin "^(always_inline|export|fieldwise_init|implicit|noinline|nonmaterializable|parameter|pure|register_passable|staticmethod|unroll|value)$"))
+ 
+ ((decorator
+   (call function: (identifier) @attribute.builtin))
+- (#match? @attribute.builtin "^(fieldwise_init|register_passable|parameter|value|always_inline|noinline|staticmethod|nonmaterializable)$"))
++ (#match? @attribute.builtin "^(always_inline|export|fieldwise_init|implicit|noinline|nonmaterializable|parameter|pure|register_passable|staticmethod|unroll|value)$"))
+ 
+ ; Function calls
+ 
+@@ -159,6 +154,7 @@
+ [
+   "fn"
+   "var"
++  "let"
+   "struct"
+   "trait"
+   "alias"
+diff --git a/languages/mojo/indents.scm b/languages/mojo/indents.scm
+index 28db7eb..2d9f190 100644
+--- a/languages/mojo/indents.scm
++++ b/languages/mojo/indents.scm
+@@ -39,3 +39,5 @@
+ (finally_clause) @start.finally
+ 
+ (case_clause) @start.case
++
++(comptime_statement) @start.comptime
+diff --git a/languages/mojo/outline.scm b/languages/mojo/outline.scm
+index d97690e..9117104 100644
+--- a/languages/mojo/outline.scm
++++ b/languages/mojo/outline.scm
+@@ -13,5 +13,8 @@
+ (alias_declaration
+   name: (identifier) @name) @item
+ 
++(comptime_declaration
++  name: (identifier) @name) @item
++
+ (variable_declaration
+   name: (identifier) @name) @item
+diff --git a/languages/mojo/runnables.scm b/languages/mojo/runnables.scm
+index ff72e60..739e5c2 100644
+--- a/languages/mojo/runnables.scm
++++ b/languages/mojo/runnables.scm
+@@ -5,3 +5,12 @@
+   name: (identifier) @run
+   (#eq? @run "main")
+   (#set! tag mojo-main))
++
++; Show a runnable indicator on Mojo test functions (`def test_...`).
++; Bind this tag from a Zed task with `tags = ["mojo-test"]`.
++
++(function_definition
++  name: (identifier) @run
++  (#match? @run "^test_")
++  (#set! tag mojo-test))
++
+diff --git a/languages/mojo/tasks.json b/languages/mojo/tasks.json
+index 2a45ee7..e2c6106 100644
+--- a/languages/mojo/tasks.json
++++ b/languages/mojo/tasks.json
+@@ -10,5 +10,65 @@
+     "reveal": "always",
+     "hide": "never",
+     "tags": ["mojo-main"]
++  },
++  {
++    "label": "mojo test current file",
++    "command": "mojo",
++    "args": ["run", "$ZED_FILE"],
++    "cwd": "$ZED_WORKTREE_ROOT",
++    "save": "current",
++    "use_new_terminal": false,
++    "allow_concurrent_runs": false,
++    "reveal": "always",
++    "hide": "never",
++    "tags": ["mojo-test"]
++  },
++  {
++    "label": "mojo build current file",
++    "command": "mojo",
++    "args": ["build", "$ZED_FILE", "-o", "$ZED_WORKTREE_ROOT/build/$ZED_STEM"],
++    "cwd": "$ZED_WORKTREE_ROOT",
++    "save": "current",
++    "use_new_terminal": false,
++    "allow_concurrent_runs": false,
++    "reveal": "always",
++    "hide": "never",
++    "tags": ["mojo-build"]
++  },
++  {
++    "label": "mojo format current file",
++    "command": "mojo",
++    "args": ["format", "$ZED_FILE"],
++    "cwd": "$ZED_WORKTREE_ROOT",
++    "save": "current",
++    "use_new_terminal": false,
++    "allow_concurrent_runs": false,
++    "reveal": "always",
++    "hide": "never",
++    "tags": ["mojo-format"]
++  },
++  {
++    "label": "mojo doc current file",
++    "command": "mojo",
++    "args": ["doc", "$ZED_FILE"],
++    "cwd": "$ZED_WORKTREE_ROOT",
++    "save": "current",
++    "use_new_terminal": false,
++    "allow_concurrent_runs": false,
++    "reveal": "always",
++    "hide": "never",
++    "tags": ["mojo-doc"]
++  },
++  {
++    "label": "mojo repl",
++    "command": "mojo",
++    "args": ["repl"],
++    "cwd": "$ZED_WORKTREE_ROOT",
++    "save": "none",
++    "use_new_terminal": true,
++    "allow_concurrent_runs": false,
++    "reveal": "always",
++    "hide": "never",
++    "tags": ["mojo-repl"]
+   }
+ ]
+diff --git a/languages/mojo/textobjects.scm b/languages/mojo/textobjects.scm
+index 48c4b86..2059122 100644
+--- a/languages/mojo/textobjects.scm
++++ b/languages/mojo/textobjects.scm
+@@ -11,3 +11,9 @@
+   body: (block) @class.inside) @class.around
+ 
+ (comment)+ @comment.around
++
++(parameters
++  (_)* @parameter.inside) @parameter.around
++
++(argument_list
++  (_)* @parameter.inside) @parameter.around
+diff --git a/snippets/mojo.json b/snippets/mojo.json
+index 97f6d49..68cfd99 100644
+--- a/snippets/mojo.json
++++ b/snippets/mojo.json
+@@ -139,9 +139,16 @@
+   "Alias": {
+     "prefix": "alias",
+     "body": [
+-      "alias ${1:Name} = ${2:Value}"
++      "comptime ${1:Name} = ${2:Value}"
+     ],
+-    "description": "Create a Mojo alias"
++    "description": "Create a Mojo alias (using comptime)"
++  },
++  "Comptime constant": {
++    "prefix": "comptime",
++    "body": [
++      "comptime ${1:Name} = ${2:Value}"
++    ],
++    "description": "Create a Mojo compile-time constant or type alias"
+   },
+   "Variable": {
+     "prefix": "var",
+@@ -241,6 +248,53 @@
+     ],
+     "description": "Create a Mojo Dict value"
+   },
++  "Array value": {
++    "prefix": "array",
++    "body": [
++      "var ${1:items} = Array[${2:Type}, ${3:size}]($0)"
++    ],
++    "description": "Create a Mojo Array value"
++  },
++  "InlineArray value": {
++    "prefix": "inlinearray",
++    "body": [
++      "var ${1:items} = InlineArray[${2:Type}, ${3:size}]($0)"
++    ],
++    "description": "Create a stack-allocated InlineArray"
++  },
++  "Span slice": {
++    "prefix": "span",
++    "body": [
++      "var ${1:view} = Span(${2:items})"
++    ],
++    "description": "Create a non-owning Span view"
++  },
++  "SIMD vector": {
++    "prefix": "simd",
++    "body": [
++      "var ${1:vec} = SIMD[DType.${2:float32}, ${3:4}]($0)"
++    ],
++    "description": "Create a SIMD vector"
++  },
++  "Python import": {
++    "prefix": "pyimport",
++    "body": [
++      "from std.python import Python",
++      "",
++      "var ${1:np} = Python.import_module(\"${2:numpy}\")"
++    ],
++    "description": "Import a Python module using std.python"
++  },
++  "Value struct": {
++    "prefix": "valuestruct",
++    "body": [
++      "@value",
++      "struct ${1:Name}:",
++      "    var ${2:field}: ${3:Type}",
++      "    $0"
++    ],
++    "description": "Create a Mojo struct decorated with @value"
++  },
+   "Test function": {
+     "prefix": "test",
+     "body": [
+@@ -248,5 +302,19 @@
+       "    $0"
+     ],
+     "description": "Create a Mojo test function"
++  },
++  "Assert equal": {
++    "prefix": "assert_eq",
++    "body": [
++      "assert_equal(${1:actual}, ${2:expected})"
++    ],
++    "description": "Assert equality in Mojo tests"
++  },
++  "Assert true": {
++    "prefix": "assert_true",
++    "body": [
++      "assert_true(${1:condition})"
++    ],
++    "description": "Assert truthiness in Mojo tests"
+   }
+ }
+-- 
+2.43.0
+

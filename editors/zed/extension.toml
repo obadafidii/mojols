@@ -1,16 +1,13 @@
 id = "mojols"
-name = "Mojo (mojols)"
+name = "mojols"
 version = "0.1.0"
 schema_version = 1
 authors = ["David Dada <davidtofunmidada@gmail.com>"]
-description = "Mojo support backed by mojols, a supervised, workspace-aware language server around mojo-lsp-server."
+description = "mojols language server for Mojo: crash-proof, workspace-aware, works alongside the Mojo extension."
 repository = "https://github.com/obadafidii/mojols"
-snippets = ["./snippets/mojo.json"]
 
-[grammars.mojo]
-repository = "https://github.com/vadim-su/tree-sitter-mojo"
-rev = "406abfdf4d2070d742e56d5e74261b5a944f729f"
-
+# Language server only. The Mojo language (grammar, highlighting, snippets)
+# comes from the `mojo` extension; mojols attaches to it by name.
 [language_servers.mojols]
 name = "mojols"
 languages = ["Mojo"]

@@ -52,9 +52,11 @@ make probe FILES="path/to/some.mojo path/to/other.mojo"
 
 ### Zed
 
-1. Put `mojols` on your PATH (`cp bin/mojols ~/go/bin/` or `go install ./server/cmd/mojols` from `server/`).
-2. Uninstall any other Mojo extension (two extensions cannot both define the Mojo language).
-3. In Zed: `zed: extensions` → **Install Dev Extension** → choose `editors/zed`.
+1. Install the `mojo` extension from Zed's extension list. It provides the Mojo language: grammar, highlighting and snippets.
+2. Put `mojols` on your PATH (`cp bin/mojols ~/go/bin/` or `go install ./server/cmd/mojols` from `server/`), or let the extension download the latest release.
+3. In Zed: `zed: extensions` → **Install Dev Extension** → choose `editors/zed`. This extension is only the language server.
+4. Turn off the `mojo` extension's direct `mojo-lsp-server`, since mojols already runs and supervises it:
+   `"languages": {"Mojo": {"language_servers": ["mojols", "!mojo-lsp-server", "..."]}}`
 
 Options go in Zed settings:
 
@@ -117,4 +119,4 @@ scripts/release.sh       dist/mojols_<os>_<arch>.tar.gz (the names the Zed exten
 
 ## License
 
-Apache 2.0. The Zed extension's tree-sitter queries and snippets come from [vadim-su/zed_mojo](https://github.com/vadim-su/zed_mojo) under MIT; see `editors/zed/LICENSE-queries-MIT`.
+Apache 2.0.
