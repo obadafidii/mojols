@@ -50,6 +50,8 @@ func main() {
 		fmt.Println("mojols", fullVersion())
 	case "debug-parse": // undocumented: mojols' own parse as JSON
 		os.Exit(debugParse(args))
+	case "debug-organize": // undocumented: organize imports in files
+		os.Exit(debugOrganize(args))
 	case "debug-resolve": // undocumented: what each identifier resolves to
 		os.Exit(debugResolve(args))
 	default:

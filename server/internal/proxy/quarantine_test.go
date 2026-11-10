@@ -78,10 +78,10 @@ func TestPoisonedFileIsQuarantined(t *testing.T) {
 	if got := hoverText(t, h.hoverURI(goodURI)); got != "fine" {
 		t.Fatalf("good file lost features: %q", got)
 	}
-	m := h.hoverURI(badURI)
-	wantError(t, m, jsonrpc.CodeRequestFailed)
-	if !strings.Contains(m.Error.Message, "quarantined") {
-		t.Fatalf("error should say why: %q", m.Error.Message)
+	// The quarantined file is answered by mojols itself, not with an error
+	// the editor would log on every hover.
+	if m := h.hoverURI(badURI); m.Error != nil {
+		t.Fatalf("hover on a quarantined file: %v", m.Error)
 	}
 	if fs := h.fakeState(); len(fs.Docs) != 1 {
 		t.Fatalf("quarantined file reached the backend: %+v", fs.Docs)

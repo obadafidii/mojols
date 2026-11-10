@@ -676,4 +676,6 @@ func indexCapabilities(caps map[string]any) {
 	caps["workspaceSymbolProvider"] = true
 	caps["typeHierarchyProvider"] = true
 	caps["callHierarchyProvider"] = true
+	// Organize imports is mojols' own; the backend's quick fixes stay.
+	caps["codeActionProvider"] = map[string]any{"codeActionKinds": []string{"quickfix", "refactor", organizeKind}}
 }

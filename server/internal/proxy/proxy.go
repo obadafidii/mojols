@@ -453,6 +453,23 @@ func (s *Server) handleClient(m *jsonrpc.Message) {
 		}
 		// Also forwarded below, in case the backend ever watches files itself.
 	}
+	if s.ix != nil && m.IsRequest() && m.Method == "textDocument/codeAction" && onlyOrganize(m.Params) {
+		// Organize imports on save: mojols' own, no backend round trip.
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.log.Error("organize imports failed", "panic", r)
+					s.reply(*m.ID, []any{})
+				}
+			}()
+			actions := []any{}
+			if a, ok := s.organizeAction(m.Params); ok {
+				actions = append(actions, a)
+			}
+			s.reply(*m.ID, actions)
+		}()
+		return
+	}
 	if s.ix != nil && m.IsRequest() && indexMethods[m.Method] {
 		go func() {
 			handled := false
@@ -512,11 +529,21 @@ func (s *Server) handleRequest(m *jsonrpc.Message) {
 	s.mu.Lock()
 	if s.degraded {
 		s.mu.Unlock()
+		if fb := s.fallbackReply(m, *m.ID); fb != nil {
+			s.write(fb)
+			return
+		}
 		s.replyError(*m.ID, jsonrpc.CodeRequestFailed, "mojols: mojo-lsp-server is unavailable (degraded mode after repeated crashes); see the mojols log")
 		return
 	}
 	if reply := s.blockedReplyLocked(*m.ID, docURIOf(m.Params)); reply != nil {
+		quarantined, _ := s.blockedLocked(docURIOf(m.Params))
 		s.mu.Unlock()
+		if quarantined {
+			if fb := s.fallbackReply(m, *m.ID); fb != nil {
+				reply = fb
+			}
+		}
 		s.write(reply)
 		return
 	}
@@ -827,10 +854,16 @@ func (s *Server) onBackendInitialized(gen int, result json.RawMessage) {
 	// suspects and quarantined files get the reply they would get live, and
 	// documents beyond the residency cap are reopened first.
 	var blockedReplies []*jsonrpc.Message
+	var fallbacks []*pending
 	for _, p := range s.queue {
 		uri := docURIOf(p.msg.Params)
 		if reply := s.blockedReplyLocked(p.clientID, uri); reply != nil {
 			s.removeLocked(p)
+			if q, _ := s.blockedLocked(uri); q && s.ix != nil {
+				fallbacks = append(fallbacks, p) // answered from the index below
+				blockedReplies = append(blockedReplies, nil)
+				continue
+			}
 			blockedReplies = append(blockedReplies, reply)
 			continue
 		}
@@ -846,6 +879,18 @@ func (s *Server) onBackendInitialized(gen int, result json.RawMessage) {
 	s.log.Info("backend ready", "generation", gen, "replayedDocuments", replayed)
 	if answerID != nil {
 		s.write(&jsonrpc.Message{ID: answerID, Result: answer})
+	}
+	k := 0
+	for i, r := range blockedReplies {
+		if r == nil {
+			p := fallbacks[k]
+			k++
+			if fb := s.fallbackReply(p.msg, p.clientID); fb != nil {
+				blockedReplies[i] = fb
+			} else {
+				blockedReplies[i] = errorMessage(p.clientID, jsonrpc.CodeRequestFailed, "mojols: "+fileName(docURIOf(p.msg.Params))+" is quarantined because it crashes mojo-lsp-server; save a change to it to retry")
+			}
+		}
 	}
 	s.sendAll(blockedReplies)
 	if wasDegraded {
@@ -1036,6 +1081,10 @@ func (s *Server) onBackendMessage(b *backend, m *jsonrpc.Message) {
 		}
 		out := *m
 		out.ID = &p.clientID
+		if p.method == "textDocument/codeAction" && s.ix != nil {
+			s.write(s.withOrganize(p.msg.Params, &out))
+			return
+		}
 		s.write(&out)
 
 	case m.IsRequest():

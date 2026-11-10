@@ -444,3 +444,96 @@ area(Circle(1.0))
 	// And the item reached that way can be followed further.
 	h.callOK("callHierarchy/outgoingCalls", map[string]any{"item": items[0]}, &out)
 }
+
+func TestFallbackHoverAndOutlineWithoutBackend(t *testing.T) {
+	dir := indexedWorkspace(t)
+	os.WriteFile(filepath.Join(dir, "pkg/geo/shapes.mojo"), []byte("struct Circle:\n    var r: Float64\n\ndef area(c: Circle) -> Float64:\n    \"\"\"The area.\n\n    Uses r squared.\n    \"\"\"\n    return c.r * c.r\n"), 0o644)
+	h := newIndexedHarness(t, dir, []string{"MOJOLS_FAKE_EXIT_ON_START=1"}, false)
+	h.expect("degraded", 10*time.Second, func(m *jsonrpc.Message) bool { return m.Method == "window/showMessage" })
+	mainURI := pathToURI(filepath.Join(dir, "app/main.mojo"))
+	src, _ := os.ReadFile(filepath.Join(dir, "app/main.mojo"))
+	h.openURI(mainURI, string(src))
+	var hov struct {
+		Contents struct{ Kind, Value string } `json:"contents"`
+	}
+	h.callOK("textDocument/hover", map[string]any{"textDocument": map[string]any{"uri": mainURI}, "position": pos(4, 11)}, &hov)
+	want := "```mojo\ndef area(c: Circle) -> Float64\n```\n\n---\n\nThe area.\n\nUses r squared."
+	if hov.Contents.Kind != "markdown" || hov.Contents.Value != want {
+		t.Errorf("hover:\n%q\nwant\n%q", hov.Contents.Value, want)
+	}
+	h.callOK("textDocument/hover", map[string]any{"textDocument": map[string]any{"uri": mainURI}, "position": pos(4, 22)}, &hov)
+	if !strings.Contains(hov.Contents.Value, "var r: Float64") || !strings.Contains(hov.Contents.Value, "In `struct Circle`") {
+		t.Errorf("field hover: %q", hov.Contents.Value)
+	}
+	var syms []struct {
+		Name     string `json:"name"`
+		Children []struct {
+			Name string `json:"name"`
+		} `json:"children"`
+	}
+	h.callOK("textDocument/documentSymbol", map[string]any{"textDocument": map[string]any{"uri": pathToURI(filepath.Join(dir, "pkg/geo/shapes.mojo"))}}, &syms)
+	if len(syms) != 2 || syms[0].Name != "Circle" || len(syms[0].Children) != 1 || syms[1].Name != "area" {
+		t.Errorf("outline: %+v", syms)
+	}
+	var actions []any
+	h.callOK("textDocument/codeAction", map[string]any{"textDocument": map[string]any{"uri": mainURI}, "range": map[string]any{"start": pos(0, 0), "end": pos(0, 0)}, "context": map[string]any{"diagnostics": []any{}}}, &actions)
+}
+
+func TestOrganizeImportsAction(t *testing.T) {
+	dir := indexedWorkspace(t)
+	h := newIndexedHarness(t, dir, nil, false)
+	uri := pathToURI(filepath.Join(dir, "app/tidy.mojo"))
+	h.openURI(uri, "from geo import Circle, area\nfrom geo import area\nimport unused\n\ndef main():\n    print(area(Circle(1.0)))\n")
+	type action struct {
+		Title string `json:"title"`
+		Kind  string `json:"kind"`
+		Edit  struct {
+			Changes map[string][]struct {
+				NewText string `json:"newText"`
+			} `json:"changes"`
+		} `json:"edit"`
+	}
+	// On save: only organize imports, answered by mojols alone.
+	var actions []action
+	h.callOK("textDocument/codeAction", map[string]any{"textDocument": map[string]any{"uri": uri}, "range": map[string]any{"start": pos(0, 0), "end": pos(0, 0)},
+		"context": map[string]any{"diagnostics": []any{}, "only": []string{"source.organizeImports"}}}, &actions)
+	if len(actions) != 1 || actions[0].Kind != "source.organizeImports" || actions[0].Edit.Changes[uri][0].NewText != "from geo import Circle, area" {
+		t.Fatalf("organize on save: %+v", actions)
+	}
+	if h.fakeState().Definitions != 0 {
+		t.Fatal("unexpected backend traffic")
+	}
+	// The light bulb: the backend's quick fixes plus organize imports.
+	h.callOK("textDocument/codeAction", map[string]any{"textDocument": map[string]any{"uri": uri}, "range": map[string]any{"start": pos(5, 4), "end": pos(5, 4)},
+		"context": map[string]any{"diagnostics": []any{}}}, &actions)
+	if len(actions) != 2 || actions[0].Title != "fake quick fix" || actions[1].Title != "Organize imports" {
+		t.Fatalf("merged code actions: %+v", actions)
+	}
+	// Nothing to organize: no action offered.
+	h.replaceText(uri, 2, "from geo import Circle, area\n\ndef main():\n    print(area(Circle(1.0)))\n")
+	h.callOK("textDocument/codeAction", map[string]any{"textDocument": map[string]any{"uri": uri}, "range": map[string]any{"start": pos(0, 0), "end": pos(0, 0)},
+		"context": map[string]any{"diagnostics": []any{}, "only": []string{"source.organizeImports"}}}, &actions)
+	if len(actions) != 0 {
+		t.Errorf("already organized: %+v", actions)
+	}
+}
+
+func TestOrganizeKeepsPackageImports(t *testing.T) {
+	dir := indexedWorkspace(t)
+	h := newIndexedHarness(t, dir, nil, false)
+	// A module of the geo package: its imports may be public API.
+	uri := pathToURI(filepath.Join(dir, "pkg/geo/extra.mojo"))
+	h.openURI(uri, "from .shapes import area\nfrom .shapes import Circle\n")
+	var actions []struct {
+		Edit struct {
+			Changes map[string][]struct {
+				NewText string `json:"newText"`
+			} `json:"changes"`
+		} `json:"edit"`
+	}
+	h.callOK("textDocument/codeAction", map[string]any{"textDocument": map[string]any{"uri": uri}, "range": map[string]any{"start": pos(0, 0), "end": pos(0, 0)},
+		"context": map[string]any{"diagnostics": []any{}, "only": []string{"source.organizeImports"}}}, &actions)
+	if len(actions) != 1 || actions[0].Edit.Changes[uri][0].NewText != "from .shapes import Circle, area" {
+		t.Errorf("package module: merged, nothing removed: %+v", actions)
+	}
+}

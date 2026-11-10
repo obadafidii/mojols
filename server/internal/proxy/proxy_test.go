@@ -348,7 +348,13 @@ func TestCrashLoopEntersDegradedMode(t *testing.T) {
 		return m.Method == "window/showMessage" && strings.Contains(string(m.Params), "degraded")
 	})
 	h.open("x")
-	wantError(t, h.hover(), jsonrpc.CodeRequestFailed)
+	// Degraded: answered by mojols itself (no error for the editor to
+	// log); here there is nothing to describe, so null.
+	if m := h.hover(); m.Error != nil || string(m.Result) != "null" {
+		t.Fatalf("degraded hover: %v %s", m.Error, m.Result)
+	}
+	// A method mojols cannot answer itself still says why.
+	wantError(t, h.call("textDocument/references", nil), jsonrpc.CodeRequestFailed)
 	if st := h.status(); !st.Degraded || st.Restarts != 5 {
 		t.Fatalf("status: %+v", st)
 	}

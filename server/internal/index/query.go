@@ -106,3 +106,39 @@ func matchRank(name, q string) (int, bool) {
 	}
 	return 3, i == len(q)
 }
+
+// ImportedElsewhere reports whether some other workspace file or open
+// document imports the name that f's top-level import binds as bound,
+// through f (a re-export). Organize imports keeps such names.
+func (ix *Index) ImportedElsewhere(f *File, bound string) bool {
+	ix.lock()
+	defer ix.mu.Unlock()
+	var decls []*syntax.Decl
+	for _, d := range f.Syn.Module.Names[bound] {
+		if d.Kind == syntax.KImport {
+			decls = append(decls, d)
+		}
+	}
+	if len(decls) == 0 {
+		return false
+	}
+	for _, g := range ix.workspaceFiles() {
+		if g == f {
+			continue
+		}
+		for _, i := range g.ByName[bound] {
+			ix.budget = stepBudget
+			for _, t := range ix.resolveRef(g, i, 0) {
+				if t.File != f || t.IsModule() {
+					continue
+				}
+				for _, d := range decls {
+					if t.Decl == d {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}

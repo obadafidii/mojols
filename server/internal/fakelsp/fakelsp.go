@@ -263,6 +263,8 @@ func (f *fake) handle(m *jsonrpc.Message) {
 			id := c.ID
 			f.w.Write(jsonrpc.NewErrorResponse(&id, jsonrpc.NewError(jsonrpc.CodeRequestCancelled, "cancelled")))
 		}
+	case "textDocument/codeAction":
+		f.reply(m, []any{map[string]any{"title": "fake quick fix", "kind": "quickfix"}})
 	case "textDocument/definition":
 		f.mu.Lock()
 		f.state.Definitions++
