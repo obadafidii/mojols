@@ -38,6 +38,15 @@ type Index struct {
 	paths     []string // .mojo files found under them
 	scanned   bool     // paths is current
 
+	// names maps every module-level name to the files declaring it, for
+	// completion and import fixes; rebuilt when the index changes.
+	names      map[string][]*File
+	sorted     []string         // the keys of names, sorted
+	namesFrom  map[string]*File // the parse of each path names reflects
+	namesGen   uint64
+	namesOK    bool
+	namesDirty map[string]bool // paths changed since names was updated
+
 	// Editor changes arrive here under their own lock, so recording one
 	// never waits for a running query; queries apply them first.
 	inboxMu sync.Mutex
@@ -93,6 +102,7 @@ func (ix *Index) SetRoots(roots []string) {
 	defer ix.mu.Unlock()
 	ix.roots = append([]string(nil), roots...)
 	ix.stat = map[string]bool{}
+	ix.namesOK = false
 	ix.gen++
 }
 
@@ -133,6 +143,10 @@ func (ix *Index) lock() {
 	ix.inbox = nil
 	ix.inboxMu.Unlock()
 	for path, c := range inbox {
+		if ix.namesDirty == nil {
+			ix.namesDirty = map[string]bool{}
+		}
+		ix.namesDirty[path] = true
 		if c.closed {
 			delete(ix.overlay, path)
 			delete(ix.files, path)

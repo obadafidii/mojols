@@ -285,6 +285,8 @@ type Server struct {
 	side *sidecar
 	// diags orders diagnostics on their way to the editor (see actions.go).
 	diags diagQueue
+	// completions holds mojols' additions to pending completions.
+	completions completionStore
 	// ix is mojols' own workspace index (nil with Options.NoIndex).
 	ix *index.Index
 	// verifier confirms references mojols cannot resolve statically
@@ -458,6 +460,20 @@ func (s *Server) handleClient(m *jsonrpc.Message) {
 		}
 		// Also forwarded below, in case the backend ever watches files itself.
 	}
+	if s.ix != nil && m.IsRequest() && m.Method == "textDocument/completion" {
+		// Inside an import statement: mojols' own answer, no backend.
+		if res, ok := s.importCompletion(m.Params); ok {
+			s.reply(*m.ID, res)
+			return
+		}
+		// Elsewhere: prepare the names an import would add, against the
+		// text as of this request, and merge them into the answer.
+		s.noteCompletion(m)
+	}
+	if s.ix != nil && m.IsRequest() && m.Method == "completionItem/resolve" && isMojolsItem(m.Params) {
+		s.reply(*m.ID, m.Params) // complete already
+		return
+	}
 	if s.ix != nil && m.IsRequest() && m.Method == "textDocument/codeAction" && onlyOrganize(m.Params) {
 		// Organize imports on save: mojols' own, no backend round trip.
 		go func() {
@@ -520,6 +536,9 @@ func (s *Server) handleInitialize(m *jsonrpc.Message) {
 	s.roots = workspaceRoots(m.Params)
 	if s.ix != nil {
 		s.ix.SetWorkspace(s.roots)
+		// Parse the workspace in the background, so the first completion,
+		// import fix or search does not wait for it.
+		go s.ix.Warm(nil)
 	}
 	s.mu.Unlock()
 	s.log.Info("initialize", "roots", s.roots)
@@ -1086,6 +1105,9 @@ func (s *Server) onBackendMessage(b *backend, m *jsonrpc.Message) {
 		}
 		out := *m
 		out.ID = &p.clientID
+		if p.method == "textDocument/completion" && s.ix != nil && m.Error == nil {
+			out.Result = s.finishCompletion(p.clientID, m.Result)
+		}
 		if p.method == "textDocument/codeAction" && s.ix != nil {
 			// Off this goroutine: import candidates can scan the workspace.
 			params := p.msg.Params

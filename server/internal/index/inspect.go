@@ -124,11 +124,16 @@ type ImportCandidate struct {
 // its shortest module path; candidates in from's own package come first,
 // then the standard library, then the rest.
 func (ix *Index) ImportCandidates(from *File, name string, max int) []ImportCandidate {
+	ix.lock()
+	defer ix.mu.Unlock()
+	return ix.importCandidates(from, name, max)
+}
+
+// importCandidates is ImportCandidates with the index locked.
+func (ix *Index) importCandidates(from *File, name string, max int) []ImportCandidate {
 	if name == "" || strings.HasPrefix(name, "_") {
 		return nil
 	}
-	ix.lock()
-	defer ix.mu.Unlock()
 	type cand struct {
 		ImportCandidate
 		depth int
@@ -138,6 +143,9 @@ func (ix *Index) ImportCandidates(from *File, name string, max int) []ImportCand
 		foreign bool
 	}
 	better := func(a, b cand) bool {
+		if pa, pb := privatePath(a.Module), privatePath(b.Module); pa != pb {
+			return !pa
+		}
 		if a.foreign != b.foreign {
 			return !a.foreign
 		}
@@ -147,7 +155,8 @@ func (ix *Index) ImportCandidates(from *File, name string, max int) []ImportCand
 		return a.Module < b.Module
 	}
 	best := map[*syntax.Decl]cand{}
-	for _, g := range ix.searchFiles() {
+	ix.nameTable()
+	for _, g := range ix.names[name] {
 		if g == from {
 			continue
 		}
@@ -251,4 +260,15 @@ func (ix *Index) moduleName(g *File) string {
 		}
 	}
 	return strings.Join(parts, ".")
+}
+
+// privatePath reports whether a module path goes through a private module
+// (`std.utils._ansi`): importable, but not meant to be.
+func privatePath(module string) bool {
+	for _, p := range strings.Split(module, ".") {
+		if strings.HasPrefix(p, "_") {
+			return true
+		}
+	}
+	return false
 }

@@ -53,6 +53,9 @@ func (s *Server) fallbackReply(m *jsonrpc.Message, id jsonrpc.ID) *jsonrpc.Messa
 	if err != nil {
 		return nil
 	}
+	if m.Method == "textDocument/completion" {
+		raw = s.finishCompletion(id, raw) // the names an import would add
+	}
 	return &jsonrpc.Message{ID: &id, Result: raw}
 }
 

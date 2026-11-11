@@ -30,6 +30,7 @@ func (ix *Index) SetWorkspace(dirs []string) {
 	defer ix.mu.Unlock()
 	ix.workspace = append([]string(nil), dirs...)
 	ix.scanned = false
+	ix.namesOK = false
 }
 
 // SetLibraries sets directories of library sources (such as the stdlib
@@ -42,6 +43,7 @@ func (ix *Index) SetLibraries(dirs []string) {
 	ix.libs = append([]string(nil), dirs...)
 	ix.libPaths = nil
 	ix.stat = map[string]bool{}
+	ix.namesOK = false
 	ix.gen++
 }
 
@@ -82,7 +84,14 @@ func (ix *Index) searchFiles() []*File {
 	if ix.libPaths == nil && len(ix.libs) > 0 {
 		ix.libPaths = listSources(ix.libs)
 	}
+	inWorkspace := make(map[string]bool, len(files))
+	for _, f := range files {
+		inWorkspace[f.Path] = true
+	}
 	for _, p := range ix.libPaths {
+		if inWorkspace[p] {
+			continue // the stdlib checkout is inside the workspace
+		}
 		if f := ix.file(p); f != nil {
 			files = append(files, f)
 		}

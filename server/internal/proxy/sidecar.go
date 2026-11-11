@@ -93,6 +93,9 @@ func emptyResult(method string) json.RawMessage {
 }
 
 func (c *sidecar) reply(id jsonrpc.ID, method string, result json.RawMessage) {
+	if method == "textDocument/completion" && c.s.ix != nil {
+		result = c.s.finishCompletion(id, result)
+	}
 	c.s.write(&jsonrpc.Message{ID: &id, Result: result})
 }
 
@@ -311,6 +314,13 @@ func (c *sidecar) onMessage(b *backend, m *jsonrpc.Message) {
 		p.timer.Stop()
 		out := *m
 		out.ID = &p.clientID
+		if p.method == "textDocument/completion" && c.s.ix != nil && m.Error == nil {
+			go func() {
+				out.Result = c.s.finishCompletion(p.clientID, out.Result)
+				c.s.write(&out)
+			}()
+			return
+		}
 		go c.s.write(&out)
 	case m.IsRequest():
 		// workspace/configuration and the like: answer locally.
