@@ -25,6 +25,10 @@ func (s *Server) setupStdlib(serverPath string) {
 		root, err = s.opts.StdlibFetch(context.Background(), serverPath)
 	case s.opts.StdlibSources != "" && s.opts.StdlibSources != "auto":
 		root, err = stdlibDir(s.opts.StdlibSources)
+	case s.workspaceStdlib() != "":
+		// The workspace has the stdlib's sources (a modular checkout): they
+		// are what the user is editing, so go to definition lands there.
+		root = s.workspaceStdlib()
 	default:
 		s.setStdlibState("detecting the Mojo version")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -44,6 +48,7 @@ func (s *Server) setupStdlib(serverPath string) {
 	}
 	s.ix.SetLibraries([]string{root})
 	s.log.Info("stdlib sources ready", "dir", root)
+	go s.ix.Warm(nil)
 	s.setStdlibState("ready: " + root)
 }
 
@@ -69,4 +74,12 @@ func stdlibDir(dir string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("%s does not contain the std package (std/__init__.mojo)", dir)
+}
+
+// workspaceStdlib is a stdlib checkout inside the workspace, if any.
+func (s *Server) workspaceStdlib() string {
+	s.mu.Lock()
+	roots := append([]string(nil), s.roots...)
+	s.mu.Unlock()
+	return stdlib.InWorkspace(roots)
 }

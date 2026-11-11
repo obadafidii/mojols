@@ -112,6 +112,9 @@ func TestFixturesAndDuplicates(t *testing.T) {
 		"examples/c/mathlib/__init__.mojo",         // mathlib again ...
 		"examples/c/extra/__init__.mojo",           // ... plus something new: kept
 	)
+	// A test imports the helpers; nothing imports the parser's test inputs.
+	write(t, ws, "test/test_math.mojo", "from helpers import check\nfrom mathlib import add\n")
+	touch(t, ws, "test/parser/docs/__init__.mojo")
 	res := Infer([]string{ws}, Options{})
 	if got, want := rel(t, ws, res.Roots), []string{"src", "test", "examples/c"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("roots %v, want %v (skipped %+v)", got, want, res.Skipped)
@@ -127,5 +130,30 @@ func TestFixturesAndDuplicates(t *testing.T) {
 	}
 	if dropped != 2 || res.Truncated {
 		t.Fatalf("want examples/a and examples/b dropped as redundant: %+v", res.Skipped)
+	}
+}
+
+func write(t *testing.T, ws, rel, content string) {
+	t.Helper()
+	p := filepath.Join(ws, rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnimportedTestRootsAreSkipped(t *testing.T) {
+	ws := t.TempDir()
+	touch(t, ws, "test/parser/docs/__init__.mojo", "test/parser/docs/a.mojo")
+	write(t, ws, "test/parser/docs/b.mojo", "from docs import a\n") // only from inside itself
+	res := Infer([]string{ws}, Options{})
+	if len(res.Roots) != 0 || len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0].Reason, "nothing imports docs") {
+		t.Fatalf("unimported test inputs: roots %v, skipped %+v", res.Roots, res.Skipped)
+	}
+	write(t, ws, "test/test_docs.mojo", "import docs.a\n")
+	if res := Infer([]string{ws}, Options{}); len(res.Roots) != 1 {
+		t.Fatalf("imported from outside: roots %v, skipped %+v", res.Roots, res.Skipped)
 	}
 }

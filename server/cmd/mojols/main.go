@@ -266,7 +266,9 @@ func doctor(args []string) int {
 		fmt.Printf("  (scan stopped at its %s limit; some roots may be missing, pass them with -I)\n", r.Limit)
 	}
 	fmt.Println()
-	if err == nil {
+	if dir := stdlib.InWorkspace([]string{abs}); dir != "" {
+		fmt.Printf("stdlib sources: the workspace's own checkout, %s\n", dir)
+	} else if err == nil {
 		v, verr := stdlib.DetectVersion(context.Background(), res.Path)
 		switch {
 		case verr != nil:

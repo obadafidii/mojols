@@ -11,9 +11,11 @@ package roots
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -114,6 +116,7 @@ func Infer(workspaces []string, opts Options) Result {
 	deadline := start.Add(opts.Timeout)
 	var res Result
 	found := map[string][]string{} // include dir -> packages it provides
+	var sources []string           // .mojo files seen, for the import check
 	add := func(dir, pkg string) {
 		if !contains(found[dir], pkg) {
 			found[dir] = append(found[dir], pkg)
@@ -147,6 +150,9 @@ func Infer(workspaces []string, opts Options) Result {
 			if !d.IsDir() {
 				if strings.HasSuffix(d.Name(), ".mojopkg") {
 					add(filepath.Dir(path), strings.TrimSuffix(d.Name(), ".mojopkg"))
+				}
+				if strings.HasSuffix(d.Name(), ".mojo") && len(sources) < maxImportScan {
+					sources = append(sources, path)
 				}
 				return nil
 			}
@@ -191,6 +197,9 @@ func Infer(workspaces []string, opts Options) Result {
 		}
 		return candidates[i] < candidates[j]
 	})
+	// A root inside a test directory is usually compiler test inputs; keep
+	// it only if a file outside it imports one of its packages.
+	unused := unimportedTestRoots(candidates, found, sources)
 	provider := map[string]string{} // package -> include dir providing it
 	for _, dir := range candidates {
 		pkgs := found[dir]
@@ -205,6 +214,8 @@ func Infer(workspaces []string, opts Options) Result {
 			}
 		}
 		switch {
+		case unused[dir]:
+			res.Skipped = append(res.Skipped, Skip{Dir: dir, Reason: "test inputs: nothing imports " + strings.Join(pkgs, ", ")})
 		case len(shadow) > 0:
 			res.Skipped = append(res.Skipped, Skip{Dir: dir, Reason: "would shadow the installed toolchain's " + strings.Join(shadow, ", ") + " package"})
 		case len(fresh) == 0:
@@ -229,6 +240,70 @@ func depth(p string) int { return strings.Count(filepath.Clean(p), string(filepa
 func contains(xs []string, x string) bool {
 	for _, y := range xs {
 		if y == x {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	maxImportScan  = 20_000
+	importScanTime = 400 * time.Millisecond
+	importScanHead = 8 << 10 // imports come first: read this much of a file
+)
+
+var importRe = regexp.MustCompile(`(?m)^[ \t]*(?:from|import)[ \t]+([A-Za-z_][A-Za-z0-9_]*)`)
+
+// unimportedTestRoots returns the candidate roots under a test directory
+// whose packages no file outside them imports. If the check runs out of
+// time it reports nothing, and every root is kept.
+func unimportedTestRoots(candidates []string, found map[string][]string, sources []string) map[string]bool {
+	want := map[string][]string{} // package -> test roots providing it
+	for _, dir := range candidates {
+		if !underTestDir(dir) {
+			continue
+		}
+		for _, p := range found[dir] {
+			want[p] = append(want[p], dir)
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	used := map[string]bool{} // root dir -> a package of it is imported from outside
+	deadline := time.Now().Add(importScanTime)
+	buf := make([]byte, importScanHead)
+	for _, path := range sources {
+		if time.Now().After(deadline) {
+			return nil
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		n, _ := io.ReadFull(f, buf)
+		f.Close()
+		for _, m := range importRe.FindAllSubmatch(buf[:n], -1) {
+			pkg := string(m[1])
+			for _, dir := range want[pkg] {
+				if !strings.HasPrefix(path, filepath.Join(dir, pkg)+string(filepath.Separator)) {
+					used[dir] = true
+				}
+			}
+		}
+	}
+	unused := map[string]bool{}
+	for _, dir := range candidates {
+		if underTestDir(dir) && !used[dir] {
+			unused[dir] = true
+		}
+	}
+	return unused
+}
+
+func underTestDir(dir string) bool {
+	for _, p := range strings.Split(filepath.ToSlash(dir), "/") {
+		if testDirs[strings.ToLower(p)] {
 			return true
 		}
 	}

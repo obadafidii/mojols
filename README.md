@@ -39,6 +39,8 @@ mojols parses Mojo itself (a hand-written, error-tolerant parser in Go) and reso
 - **Find references**, with anything the index can't resolve on its own confirmed by a separate `mojo-lsp-server`.
 - **Rename** across the workspace. It refuses rather than guesses if any possible use is unconfirmed, and never edits library files.
 - **Workspace symbols.**
+- **Import completion, instantly.** Inside `from ... import ...` and `import ...`, mojols completes modules, packages and names itself: your own packages, relative imports (`from .`) and the stdlib, in a few milliseconds. The official server takes over a second for these and knows only the packages it was given.
+- **Auto-import completion.** Typing a name you haven't imported (`Counter`) offers it with its module; picking it inserts the name and adds the import in the right place.
 - **Type hierarchy**: supertypes (the traits a type lists) and subtypes (every struct or trait that lists it).
 - **Call hierarchy**: incoming and outgoing calls, with constructions counted as calls to `__init__`.
 - **Organize imports** as a code action: merges, sorts and groups the leading import block, wraps long lines as `mojo format` does, and removes imports the file doesn't use. Package `__init__.mojo` files keep every import, since they re-export.
@@ -58,20 +60,24 @@ Measured against the official server on the Mojo 1.1 stdlib and its tests (579 f
 | References latency | p50 1 ms, p95 2 ms warm |
 | Members resolved in code that uses the stdlib | 4.4% before stdlib sources, 86.2% after |
 | "Import X" quick fix, 1,709 names the stdlib tests import | the right module is the first choice for 95.5%; the rest are private names it doesn't offer |
+| Import completion latency | about 2 ms (the official server: 1.3 to 2 s) |
+| Auto-import lookup on the 2,839-file modular checkout | 0.2 to 6 ms per keystroke, 0.1 ms to update after an edit |
 | Organize imports on all 579 files | 347 changed, a second pass changes none, no file stops compiling |
 
 Details and methodology: [docs/design.md](docs/design.md).
 
 ### Toolchain and project setup
 
-- **Finds the right `mojo-lsp-server` per project**: the project's pixi, magic or venv environment first, then PATH and the usual install locations. It looks again before every restart, so installing Mojo while the editor is open recovers on its own.
-- **Package roots.** Top-level packages and `.mojopkg` files in the workspace are passed to the server as `-I` include paths, so imports between your own packages resolve.
+- **Finds the right `mojo-lsp-server` per project**: the project's pixi, magic or venv environment first, then a project's environment further down the workspace (`Mojo/.pixi` in a modular checkout), an activated conda or virtual environment, then PATH and the usual install locations. It looks again before every restart, so installing Mojo while the editor is open recovers on its own.
+- **Package roots.** Top-level packages and `.mojopkg` files in the workspace are passed to the server as `-I` include paths, so imports between your own packages resolve. Packages inside test folders that nothing imports (compiler test inputs) are left out.
+- **Stdlib sources from your checkout.** If the workspace holds the stdlib's sources (a modular checkout), go to definition and completion use them instead of a download.
+- **Warm start.** The workspace is parsed in the background at startup, so the first completion or search doesn't wait for it.
 - **`mojols doctor`** explains which server it picked and why, the inferred package roots, and the stdlib sources status.
 - **Bug reports.** `--trace-file` records a session as JSON lines, and `--crash-dir` saves a replayable bundle for every server crash.
 
 ### Passed through from the official server
 
-Diagnostics, completion, signature help, semantic highlighting, inlay hints, the server's own quick fixes, and hover (when the server is healthy) come from `mojo-lsp-server` unchanged.
+Diagnostics, completion (with mojols' additions above), signature help, semantic highlighting, inlay hints, the server's own quick fixes, and hover (when the server is healthy) come from `mojo-lsp-server` unchanged.
 
 ## In progress and planned
 
@@ -82,8 +88,6 @@ Diagnostics, completion, signature help, semantic highlighting, inlay hints, the
 | Refactorings: extract variable, extract function, inline variable | Planned |
 | Run and test: "run file" and "run test" in Zed, run configurations in CLion | Planned |
 | Debugging through the toolchain's LLDB debug adapter | Planned |
-| Discovery: the nearest `.pixi` above each file (for monorepos like modular), conda environments | Planned |
-| Use a stdlib checkout in the workspace as the stdlib sources automatically | Planned |
 | On-disk index cache for faster cold starts | Planned |
 
 ## Install
@@ -147,7 +151,7 @@ mojols stdlib [dir]            download the stdlib sources for the installed Moj
 mojols version
 ```
 
-Server discovery order: `--backend`, `$MOJOLS_BACKEND`, the workspace's `.pixi/envs/default/bin`, `.magic/envs/default/bin`, `.venv/bin`, `PATH`, then `~/.pixi/bin`, `~/.mojo/bin`, `~/.modular/bin`, `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`.
+Server discovery order: `--backend`, `$MOJOLS_BACKEND`, the workspace's `.pixi/envs/default/bin`, `.magic/envs/default/bin`, `.venv/bin`, the same in a project up to three folders down (one with a `pixi.toml`, `mojoproject.toml` or `pyproject.toml`), `$CONDA_PREFIX/bin`, `$VIRTUAL_ENV/bin`, `PATH`, then `~/.pixi/bin`, `~/.mojo/bin`, `~/.modular/bin`, `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`.
 
 ## How it works
 

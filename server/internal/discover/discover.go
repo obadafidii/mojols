@@ -40,11 +40,14 @@ type Env struct {
 	Getenv   func(string) string
 	LookPath func(string) (string, error)
 	IsExec   func(string) bool
+	// ReadDir lists a directory, for finding project environments below
+	// the workspace root; nil skips that step.
+	ReadDir func(string) ([]os.DirEntry, error)
 }
 
 // OSEnv is the real environment.
 func OSEnv() Env {
-	return Env{Getenv: os.Getenv, LookPath: exec.LookPath, IsExec: isExecutable}
+	return Env{Getenv: os.Getenv, LookPath: exec.LookPath, IsExec: isExecutable, ReadDir: os.ReadDir}
 }
 
 func isExecutable(p string) bool {
@@ -94,10 +97,28 @@ func Find(explicit string, roots []string, env Env) (Result, error) {
 		return res, fmt.Errorf("%w: $%s=%q is not an executable file", ErrNotFound, EnvBackend, v)
 	}
 	for _, root := range roots {
-		for _, rel := range []string{".pixi/envs/default/bin", ".magic/envs/default/bin", ".venv/bin"} {
+		for _, rel := range envDirs {
 			if try(filepath.Join(root, rel, Binary), "workspace "+rel) {
 				return res, nil
 			}
+		}
+	}
+	// A project inside the workspace with its own environment (modular's
+	// Mojo/ in a checkout of the whole repository): the shallowest wins.
+	for _, root := range roots {
+		for _, dir := range projectDirs(root, env) {
+			rel, _ := filepath.Rel(root, dir)
+			for _, envDir := range envDirs {
+				if try(filepath.Join(dir, envDir, Binary), "workspace "+filepath.ToSlash(filepath.Join(rel, envDir))) {
+					return res, nil
+				}
+			}
+		}
+	}
+	// An activated conda or virtual environment.
+	for _, v := range []string{"CONDA_PREFIX", "VIRTUAL_ENV"} {
+		if dir := env.Getenv(v); dir != "" && try(filepath.Join(dir, "bin", Binary), "$"+v) {
+			return res, nil
 		}
 	}
 	if p, err := env.LookPath(Binary); err == nil {
@@ -120,6 +141,68 @@ func Find(explicit string, roots []string, env Env) (Result, error) {
 		}
 	}
 	return res, ErrNotFound
+}
+
+var envDirs = []string{".pixi/envs/default/bin", ".magic/envs/default/bin", ".venv/bin"}
+
+// projectMarkers name the files that make a directory a Mojo project with
+// its own environment.
+var projectMarkers = []string{"pixi.toml", "mojoproject.toml", "pyproject.toml"}
+
+// projectDirs lists directories below root (up to three levels, shallowest
+// first, then by name) that hold a project file and an environment.
+func projectDirs(root string, env Env) []string {
+	if env.ReadDir == nil {
+		return nil
+	}
+	var out []string
+	level := []string{root}
+	for depth := 1; depth <= 3 && len(level) > 0; depth++ {
+		var next []string
+		for _, dir := range level {
+			ents, err := env.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, e := range ents {
+				n := e.Name()
+				if !e.IsDir() || strings.HasPrefix(n, ".") || strings.HasPrefix(n, "bazel-") || skipProjectDirs[n] {
+					continue
+				}
+				sub := filepath.Join(dir, n)
+				next = append(next, sub)
+				if hasEnv(sub, env) {
+					out = append(out, sub)
+				}
+			}
+			if len(next) > 2000 {
+				return out // a huge tree: stop looking
+			}
+		}
+		level = next
+	}
+	return out
+}
+
+var skipProjectDirs = map[string]bool{"node_modules": true, "build": true, "dist": true, "target": true, "__pycache__": true, "venv": true}
+
+func hasEnv(dir string, env Env) bool {
+	ents, err := env.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	marker, envDir := false, false
+	for _, e := range ents {
+		for _, m := range projectMarkers {
+			if e.Name() == m {
+				marker = true
+			}
+		}
+		if e.Name() == ".pixi" || e.Name() == ".magic" || e.Name() == ".venv" {
+			envDir = true
+		}
+	}
+	return marker && envDir
 }
 
 func expandHome(p string, env Env) string {
